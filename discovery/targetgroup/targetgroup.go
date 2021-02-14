@@ -24,7 +24,7 @@ import (
 type Group struct {
 	// Targets is a list of targets identified by a label set. Each target is
 	// uniquely identifiable in the group by its address label.
-	Targets []model.LabelSet
+	Targets []model.LabelSet `jsonschema:"-"`
 	// Labels is a set of labels that is common across all targets in the group.
 	Labels model.LabelSet
 
