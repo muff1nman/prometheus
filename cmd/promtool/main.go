@@ -845,9 +845,18 @@ func schemaTypeName(t reflect.Type) string {
 
 func schemaAddFields(t reflect.Type) []reflect.StructField {
 	scrapeConfig := reflect.TypeOf((*config.ScrapeConfig)(nil)).Elem()
-	alertConfg := reflect.TypeOf((*config.AlertmanagerConfig)(nil)).Elem()
-	if t == scrapeConfig || t == alertConfg {
+	alertConfig := reflect.TypeOf((*config.AlertmanagerConfig)(nil)).Elem()
+	group := reflect.TypeOf((*targetgroup.Group)(nil)).Elem()
+	if t == scrapeConfig || t == alertConfig {
 		return discovery.ConfigsAsFields()
+	}
+	if t == group {
+		return []reflect.StructField{
+			{
+				Name: "Targets",
+				Type: reflect.TypeOf((*[]string)(nil)).Elem(),
+			},
+		}
 	}
 	return nil
 }
