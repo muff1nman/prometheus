@@ -311,7 +311,6 @@ func main() {
 
 	case importRulesCmd.FullCommand():
 		os.Exit(checkErr(importRules(*importRulesURL, *importRulesStart, *importRulesEnd, *importRulesOutputDir, *importRulesEvalInterval, *maxBlockDuration, *importRulesFiles...)))
-		os.Exit(backfillOpenMetrics(*importFilePath, *importDBPath, *importHumanReadable, *importQuiet, *maxBlockDuration))
 
 	case schemasConfigCmd.FullCommand():
 		os.Exit(OutputSchema(reflect.TypeOf(&config.Config{})))
