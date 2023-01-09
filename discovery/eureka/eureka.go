@@ -15,14 +15,14 @@ package eureka
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"time"
 
-	"github.com/go-kit/kit/log"
-	"github.com/pkg/errors"
+	"github.com/go-kit/log"
 	"github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
 
@@ -60,7 +60,8 @@ const (
 
 // DefaultSDConfig is the default Eureka SD configuration.
 var DefaultSDConfig = SDConfig{
-	RefreshInterval: model.Duration(30 * time.Second),
+	RefreshInterval:  model.Duration(30 * time.Second),
+	HTTPClientConfig: config.DefaultHTTPClientConfig,
 }
 
 func init() {
@@ -115,9 +116,9 @@ type Discovery struct {
 	server string
 }
 
-// New creates a new Eureka discovery for the given role.
+// NewDiscovery creates a new Eureka discovery for the given role.
 func NewDiscovery(conf *SDConfig, logger log.Logger) (*Discovery, error) {
-	rt, err := config.NewRoundTripperFromConfig(conf.HTTPClientConfig, "eureka_sd", false, false)
+	rt, err := config.NewRoundTripperFromConfig(conf.HTTPClientConfig, "eureka_sd")
 	if err != nil {
 		return nil, err
 	}

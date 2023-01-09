@@ -16,13 +16,13 @@ package parser
 
 import (
         "math"
-        "sort"
         "strconv"
         "time"
 
-        "github.com/prometheus/prometheus/pkg/labels"
-        "github.com/prometheus/prometheus/pkg/value"
+        "github.com/prometheus/prometheus/model/labels"
+        "github.com/prometheus/prometheus/model/value"
 )
+
 %}
 
 %union {
@@ -32,6 +32,7 @@ import (
     matcher   *labels.Matcher
     label     labels.Label
     labels    labels.Labels
+    lblList   []labels.Label
     strings   []string
     series    []SequenceValue
     uint      uint64
@@ -84,6 +85,7 @@ NEQ_REGEX
 POW
 SUB
 AT
+ATAN2
 %token	operatorsEnd
 
 // Aggregators.
@@ -137,10 +139,9 @@ START_METRIC_SELECTOR
 // Type definitions for grammar rules.
 %type <matchers> label_match_list
 %type <matcher> label_matcher
-
 %type <item> aggregate_op grouping_label match_op maybe_label metric_identifier unary_op at_modifier_preprocessors
-
-%type <labels> label_set label_set_list metric
+%type <labels> label_set metric
+%type <lblList> label_set_list
 %type <label> label_set_item
 %type <strings> grouping_label_list grouping_labels maybe_grouping_labels
 %type <series> series_item series_values
@@ -156,7 +157,7 @@ START_METRIC_SELECTOR
 %left LAND LUNLESS
 %left EQLC GTE GTR LSS LTE NEQ
 %left ADD SUB
-%left MUL DIV MOD
+%left MUL DIV MOD ATAN2
 %right POW
 
 // Offset modifiers do not have associativity.
@@ -237,6 +238,7 @@ aggregate_modifier:
 
 // Operator precedence only works if each of those is listed separately.
 binary_expr     : expr ADD     bin_modifier expr { $$ = yylex.(*parser).newBinaryExpression($1, $2, $3, $4) }
+                | expr ATAN2   bin_modifier expr { $$ = yylex.(*parser).newBinaryExpression($1, $2, $3, $4) }
                 | expr DIV     bin_modifier expr { $$ = yylex.(*parser).newBinaryExpression($1, $2, $3, $4) }
                 | expr EQLC    bin_modifier expr { $$ = yylex.(*parser).newBinaryExpression($1, $2, $3, $4) }
                 | expr GTE     bin_modifier expr { $$ = yylex.(*parser).newBinaryExpression($1, $2, $3, $4) }
@@ -384,6 +386,11 @@ paren_expr      : LEFT_PAREN expr RIGHT_PAREN
 offset_expr: expr OFFSET duration
                         {
                         yylex.(*parser).addOffset($1, $3)
+                        $$ = $1
+                        }
+                | expr OFFSET SUB duration
+                        {
+                        yylex.(*parser).addOffset($1, -$4)
                         $$ = $1
                         }
                 | expr OFFSET error
@@ -560,13 +567,13 @@ label_matcher   : IDENTIFIER match_op STRING
  */
 
 metric          : metric_identifier label_set
-                        { $$ = append($2, labels.Label{Name: labels.MetricName, Value: $1.Val}); sort.Sort($$) }
+                        { b := labels.NewBuilder($2); b.Set(labels.MetricName, $1.Val); $$ = b.Labels(labels.EmptyLabels()) }
                 | label_set
                         {$$ = $1}
                 ;
 
 
-metric_identifier: AVG | BOTTOMK | BY | COUNT | COUNT_VALUES | GROUP | IDENTIFIER |  LAND | LOR | LUNLESS | MAX | METRIC_IDENTIFIER | MIN | OFFSET | QUANTILE | STDDEV | STDVAR | SUM | TOPK | WITHOUT;
+metric_identifier: AVG | BOTTOMK | BY | COUNT | COUNT_VALUES | GROUP | IDENTIFIER |  LAND | LOR | LUNLESS | MAX | METRIC_IDENTIFIER | MIN | OFFSET | QUANTILE | STDDEV | STDVAR | SUM | TOPK | WITHOUT | START | END;
 
 label_set       : LEFT_BRACE label_set_list RIGHT_BRACE
                         { $$ = labels.New($2...) }
@@ -669,7 +676,7 @@ series_value    : IDENTIFIER
 aggregate_op    : AVG | BOTTOMK | COUNT | COUNT_VALUES | GROUP | MAX | MIN | QUANTILE | STDDEV | STDVAR | SUM | TOPK ;
 
 // inside of grouping options label names can be recognized as keywords by the lexer. This is a list of keywords that could also be a label name.
-maybe_label     : AVG | BOOL | BOTTOMK | BY | COUNT | COUNT_VALUES | GROUP | GROUP_LEFT | GROUP_RIGHT | IDENTIFIER | IGNORING | LAND | LOR | LUNLESS | MAX | METRIC_IDENTIFIER | MIN | OFFSET | ON | QUANTILE | STDDEV | STDVAR | SUM | TOPK;
+maybe_label     : AVG | BOOL | BOTTOMK | BY | COUNT | COUNT_VALUES | GROUP | GROUP_LEFT | GROUP_RIGHT | IDENTIFIER | IGNORING | LAND | LOR | LUNLESS | MAX | METRIC_IDENTIFIER | MIN | OFFSET | ON | QUANTILE | STDDEV | STDVAR | SUM | TOPK | START | END | ATAN2;
 
 unary_op        : ADD | SUB;
 

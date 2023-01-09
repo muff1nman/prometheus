@@ -16,14 +16,12 @@ package tsdb
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
-	"os"
 	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/prometheus/prometheus/pkg/labels"
+	"github.com/prometheus/prometheus/model/labels"
 )
 
 // Make entries ~50B in size, to emulate real-world high cardinality.
@@ -31,16 +29,12 @@ const (
 	postingsBenchSuffix = "aaaaaaaaaabbbbbbbbbbccccccccccdddddddddd"
 )
 
-func BenchmarkPostingsForMatchers(b *testing.B) {
-	chunkDir, err := ioutil.TempDir("", "chunk_dir")
-	require.NoError(b, err)
-	defer func() {
-		require.NoError(b, os.RemoveAll(chunkDir))
-	}()
+func BenchmarkQuerier(b *testing.B) {
+	chunkDir := b.TempDir()
 	opts := DefaultHeadOptions()
 	opts.ChunkRange = 1000
 	opts.ChunkDirRoot = chunkDir
-	h, err := NewHead(nil, nil, nil, opts)
+	h, err := NewHead(nil, nil, nil, nil, opts, nil)
 	require.NoError(b, err)
 	defer func() {
 		require.NoError(b, h.Close())
@@ -48,7 +42,7 @@ func BenchmarkPostingsForMatchers(b *testing.B) {
 
 	app := h.Appender(context.Background())
 	addSeries := func(l labels.Labels) {
-		app.Add(l, 0, 0)
+		app.Append(0, l, 0, 0)
 	}
 
 	for n := 0; n < 10; n++ {
@@ -66,14 +60,15 @@ func BenchmarkPostingsForMatchers(b *testing.B) {
 	ir, err := h.Index()
 	require.NoError(b, err)
 	b.Run("Head", func(b *testing.B) {
-		benchmarkPostingsForMatchers(b, ir)
+		b.Run("PostingsForMatchers", func(b *testing.B) {
+			benchmarkPostingsForMatchers(b, ir)
+		})
+		b.Run("labelValuesWithMatchers", func(b *testing.B) {
+			benchmarkLabelValuesWithMatchers(b, ir)
+		})
 	})
 
-	tmpdir, err := ioutil.TempDir("", "test_benchpostingsformatchers")
-	require.NoError(b, err)
-	defer func() {
-		require.NoError(b, os.RemoveAll(tmpdir))
-	}()
+	tmpdir := b.TempDir()
 
 	blockdir := createBlockFromHead(b, tmpdir, h)
 	block, err := OpenBlock(nil, blockdir, nil)
@@ -85,7 +80,12 @@ func BenchmarkPostingsForMatchers(b *testing.B) {
 	require.NoError(b, err)
 	defer ir.Close()
 	b.Run("Block", func(b *testing.B) {
-		benchmarkPostingsForMatchers(b, ir)
+		b.Run("PostingsForMatchers", func(b *testing.B) {
+			benchmarkPostingsForMatchers(b, ir)
+		})
+		b.Run("labelValuesWithMatchers", func(b *testing.B) {
+			benchmarkLabelValuesWithMatchers(b, ir)
+		})
 	})
 }
 
@@ -103,7 +103,7 @@ func benchmarkPostingsForMatchers(b *testing.B, ir IndexReader) {
 	i1Plus := labels.MustNewMatcher(labels.MatchRegexp, "i", "^1.+$")
 	iEmptyRe := labels.MustNewMatcher(labels.MatchRegexp, "i", "^$")
 	iNotEmpty := labels.MustNewMatcher(labels.MatchNotEqual, "i", "")
-	iNot2 := labels.MustNewMatcher(labels.MatchNotEqual, "n", "2"+postingsBenchSuffix)
+	iNot2 := labels.MustNewMatcher(labels.MatchNotEqual, "i", "2"+postingsBenchSuffix)
 	iNot2Star := labels.MustNewMatcher(labels.MatchNotRegexp, "i", "^2.*$")
 	iNotStar2Star := labels.MustNewMatcher(labels.MatchNotRegexp, "i", "^.*2.*$")
 
@@ -143,22 +143,50 @@ func benchmarkPostingsForMatchers(b *testing.B, ir IndexReader) {
 	}
 }
 
+func benchmarkLabelValuesWithMatchers(b *testing.B, ir IndexReader) {
+	i1 := labels.MustNewMatcher(labels.MatchEqual, "i", "1")
+	iStar := labels.MustNewMatcher(labels.MatchRegexp, "i", "^.*$")
+	jNotFoo := labels.MustNewMatcher(labels.MatchNotEqual, "j", "foo")
+	n1 := labels.MustNewMatcher(labels.MatchEqual, "n", "1"+postingsBenchSuffix)
+	nPlus := labels.MustNewMatcher(labels.MatchRegexp, "i", "^.+$")
+
+	cases := []struct {
+		name      string
+		labelName string
+		matchers  []*labels.Matcher
+	}{
+		// i has 100k values.
+		{`i with n="1"`, "i", []*labels.Matcher{n1}},
+		{`i with n="^.+$"`, "i", []*labels.Matcher{nPlus}},
+		{`i with n="1",j!="foo"`, "i", []*labels.Matcher{n1, jNotFoo}},
+		{`i with n="1",i=~"^.*$",j!="foo"`, "i", []*labels.Matcher{n1, iStar, jNotFoo}},
+		// n has 10 values.
+		{`n with j!="foo"`, "n", []*labels.Matcher{jNotFoo}},
+		{`n with i="1"`, "n", []*labels.Matcher{i1}},
+	}
+
+	for _, c := range cases {
+		b.Run(c.name, func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				_, err := labelValuesWithMatchers(ir, c.labelName, c.matchers...)
+				require.NoError(b, err)
+			}
+		})
+	}
+}
+
 func BenchmarkQuerierSelect(b *testing.B) {
-	chunkDir, err := ioutil.TempDir("", "chunk_dir")
-	require.NoError(b, err)
-	defer func() {
-		require.NoError(b, os.RemoveAll(chunkDir))
-	}()
+	chunkDir := b.TempDir()
 	opts := DefaultHeadOptions()
 	opts.ChunkRange = 1000
 	opts.ChunkDirRoot = chunkDir
-	h, err := NewHead(nil, nil, nil, opts)
+	h, err := NewHead(nil, nil, nil, nil, opts, nil)
 	require.NoError(b, err)
 	defer h.Close()
 	app := h.Appender(context.Background())
 	numSeries := 1000000
 	for i := 0; i < numSeries; i++ {
-		app.Add(labels.FromStrings("foo", "bar", "i", fmt.Sprintf("%d%s", i, postingsBenchSuffix)), int64(i), 0)
+		app.Append(0, labels.FromStrings("foo", "bar", "i", fmt.Sprintf("%d%s", i, postingsBenchSuffix)), int64(i), 0)
 	}
 	require.NoError(b, app.Commit())
 
@@ -188,11 +216,7 @@ func BenchmarkQuerierSelect(b *testing.B) {
 		bench(b, h, true)
 	})
 
-	tmpdir, err := ioutil.TempDir("", "test_benchquerierselect")
-	require.NoError(b, err)
-	defer func() {
-		require.NoError(b, os.RemoveAll(tmpdir))
-	}()
+	tmpdir := b.TempDir()
 
 	blockdir := createBlockFromHead(b, tmpdir, h)
 	block, err := OpenBlock(nil, blockdir, nil)

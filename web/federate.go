@@ -18,7 +18,7 @@ import (
 	"net/http"
 	"sort"
 
-	"github.com/go-kit/kit/log/level"
+	"github.com/go-kit/log/level"
 	"github.com/gogo/protobuf/proto"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
@@ -26,13 +26,14 @@ import (
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
 
-	"github.com/prometheus/prometheus/pkg/labels"
-	"github.com/prometheus/prometheus/pkg/timestamp"
-	"github.com/prometheus/prometheus/pkg/value"
+	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/model/timestamp"
+	"github.com/prometheus/prometheus/model/value"
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb"
+	"github.com/prometheus/prometheus/tsdb/chunkenc"
 )
 
 var (
@@ -95,27 +96,31 @@ func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 
 	var sets []storage.SeriesSet
 	for _, mset := range matcherSets {
-		s := q.Select(false, hints, mset...)
+		s := q.Select(true, hints, mset...)
 		sets = append(sets, s)
 	}
 
 	set := storage.NewMergeSeriesSet(sets, storage.ChainedSeriesMerge)
 	it := storage.NewBuffer(int64(h.lookbackDelta / 1e6))
+	var chkIter chunkenc.Iterator
 	for set.Next() {
 		s := set.At()
 
 		// TODO(fabxc): allow fast path for most recent sample either
 		// in the storage itself or caching layer in Prometheus.
-		it.Reset(s.Iterator())
+		chkIter = s.Iterator(chkIter)
+		it.Reset(chkIter)
 
 		var t int64
 		var v float64
+		var ok bool
 
-		ok := it.Seek(maxt)
-		if ok {
-			t, v = it.Values()
+		valueType := it.Seek(maxt)
+		if valueType == chunkenc.ValFloat {
+			t, v = it.At()
 		} else {
-			t, v, ok = it.PeekBack(1)
+			// TODO(beorn7): Handle histograms.
+			t, v, _, ok = it.PeekBack(1)
 			if !ok {
 				continue
 			}
@@ -166,26 +171,24 @@ func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 			Untyped: &dto.Untyped{},
 		}
 
-		for _, l := range s.Metric {
+		err := s.Metric.Validate(func(l labels.Label) error {
 			if l.Value == "" {
 				// No value means unset. Never consider those labels.
 				// This is also important to protect against nameless metrics.
-				continue
+				return nil
 			}
 			if l.Name == labels.MetricName {
 				nameSeen = true
 				if l.Value == lastMetricName {
 					// We already have the name in the current MetricFamily,
 					// and we ignore nameless metrics.
-					continue
+					return nil
 				}
 				// Need to start a new MetricFamily. Ship off the old one (if any) before
 				// creating the new one.
 				if protMetricFam != nil {
 					if err := enc.Encode(protMetricFam); err != nil {
-						federationErrors.Inc()
-						level.Error(h.logger).Log("msg", "federation failed", "err", err)
-						return
+						return err
 					}
 				}
 				protMetricFam = &dto.MetricFamily{
@@ -193,7 +196,7 @@ func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 					Name: proto.String(l.Value),
 				}
 				lastMetricName = l.Value
-				continue
+				return nil
 			}
 			protMetric.Label = append(protMetric.Label, &dto.LabelPair{
 				Name:  proto.String(l.Name),
@@ -202,6 +205,12 @@ func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 			if _, ok := externalLabels[l.Name]; ok {
 				globalUsed[l.Name] = struct{}{}
 			}
+			return nil
+		})
+		if err != nil {
+			federationErrors.Inc()
+			level.Error(h.logger).Log("msg", "federation failed", "err", err)
+			return
 		}
 		if !nameSeen {
 			level.Warn(h.logger).Log("msg", "Ignoring nameless metric during federation", "metric", s.Metric)
@@ -220,6 +229,7 @@ func (h *Handler) federation(w http.ResponseWriter, req *http.Request) {
 
 		protMetric.TimestampMs = proto.Int64(s.T)
 		protMetric.Untyped.Value = proto.Float64(s.V)
+		// TODO(beorn7): Handle histograms.
 
 		protMetricFam.Metric = append(protMetricFam.Metric, protMetric)
 	}

@@ -18,7 +18,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -30,12 +30,14 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/alecthomas/units"
-	"github.com/go-kit/kit/log"
-	"github.com/pkg/errors"
-
-	"github.com/prometheus/prometheus/pkg/labels"
 	"github.com/prometheus/prometheus/storage"
+	"github.com/prometheus/prometheus/tsdb/chunkenc"
+	"github.com/prometheus/prometheus/tsdb/index"
+
+	"github.com/alecthomas/units"
+	"github.com/go-kit/log"
+
+	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/tsdb"
 	"github.com/prometheus/prometheus/tsdb/chunks"
 	tsdb_errors "github.com/prometheus/prometheus/tsdb/errors"
@@ -59,7 +61,7 @@ type writeBenchmark struct {
 	logger    log.Logger
 }
 
-func benchmarkWrite(outPath, samplesFile string, numMetrics int) error {
+func benchmarkWrite(outPath, samplesFile string, numMetrics, numScrapes int) error {
 	b := &writeBenchmark{
 		outPath:     outPath,
 		samplesFile: samplesFile,
@@ -67,7 +69,7 @@ func benchmarkWrite(outPath, samplesFile string, numMetrics int) error {
 		logger:      log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr)),
 	}
 	if b.outPath == "" {
-		dir, err := ioutil.TempDir("", "tsdb_bench")
+		dir, err := os.MkdirTemp("", "tsdb_bench")
 		if err != nil {
 			return err
 		}
@@ -77,7 +79,7 @@ func benchmarkWrite(outPath, samplesFile string, numMetrics int) error {
 	if err := os.RemoveAll(b.outPath); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(b.outPath, 0777); err != nil {
+	if err := os.MkdirAll(b.outPath, 0o777); err != nil {
 		return err
 	}
 
@@ -88,7 +90,7 @@ func benchmarkWrite(outPath, samplesFile string, numMetrics int) error {
 	st, err := tsdb.Open(dir, l, nil, &tsdb.Options{
 		RetentionDuration: int64(15 * 24 * time.Hour / time.Millisecond),
 		MinBlockDuration:  int64(2 * time.Hour / time.Millisecond),
-	})
+	}, tsdb.NewDBStats())
 	if err != nil {
 		return err
 	}
@@ -119,7 +121,7 @@ func benchmarkWrite(outPath, samplesFile string, numMetrics int) error {
 		if err := b.startProfiling(); err != nil {
 			return err
 		}
-		total, err = b.ingestScrapes(lbs, 3000)
+		total, err = b.ingestScrapes(lbs, numScrapes)
 		if err != nil {
 			return err
 		}
@@ -186,7 +188,7 @@ func (b *writeBenchmark) ingestScrapesShard(lbls []labels.Labels, scrapeCount in
 	type sample struct {
 		labels labels.Labels
 		value  int64
-		ref    *uint64
+		ref    *storage.SeriesRef
 	}
 
 	scrape := make([]*sample, 0, len(lbls))
@@ -206,25 +208,19 @@ func (b *writeBenchmark) ingestScrapesShard(lbls []labels.Labels, scrapeCount in
 		for _, s := range scrape {
 			s.value += 1000
 
-			if s.ref == nil {
-				ref, err := app.Add(s.labels, ts, float64(s.value))
-				if err != nil {
-					panic(err)
-				}
-				s.ref = &ref
-			} else if err := app.AddFast(*s.ref, ts, float64(s.value)); err != nil {
-
-				if errors.Cause(err) != storage.ErrNotFound {
-					panic(err)
-				}
-
-				ref, err := app.Add(s.labels, ts, float64(s.value))
-				if err != nil {
-					panic(err)
-				}
-				s.ref = &ref
+			var ref storage.SeriesRef
+			if s.ref != nil {
+				ref = *s.ref
 			}
 
+			ref, err := app.Append(ref, s.labels, ts, float64(s.value))
+			if err != nil {
+				panic(err)
+			}
+
+			if s.ref == nil {
+				s.ref = &ref
+			}
 			total++
 		}
 		if err := app.Commit(); err != nil {
@@ -240,29 +236,29 @@ func (b *writeBenchmark) startProfiling() error {
 	// Start CPU profiling.
 	b.cpuprof, err = os.Create(filepath.Join(b.outPath, "cpu.prof"))
 	if err != nil {
-		return fmt.Errorf("bench: could not create cpu profile: %v", err)
+		return fmt.Errorf("bench: could not create cpu profile: %w", err)
 	}
 	if err := pprof.StartCPUProfile(b.cpuprof); err != nil {
-		return fmt.Errorf("bench: could not start CPU profile: %v", err)
+		return fmt.Errorf("bench: could not start CPU profile: %w", err)
 	}
 
 	// Start memory profiling.
 	b.memprof, err = os.Create(filepath.Join(b.outPath, "mem.prof"))
 	if err != nil {
-		return fmt.Errorf("bench: could not create memory profile: %v", err)
+		return fmt.Errorf("bench: could not create memory profile: %w", err)
 	}
 	runtime.MemProfileRate = 64 * 1024
 
 	// Start fatal profiling.
 	b.blockprof, err = os.Create(filepath.Join(b.outPath, "block.prof"))
 	if err != nil {
-		return fmt.Errorf("bench: could not create block profile: %v", err)
+		return fmt.Errorf("bench: could not create block profile: %w", err)
 	}
 	runtime.SetBlockProfileRate(20)
 
 	b.mtxprof, err = os.Create(filepath.Join(b.outPath, "mutex.prof"))
 	if err != nil {
-		return fmt.Errorf("bench: could not create mutex profile: %v", err)
+		return fmt.Errorf("bench: could not create mutex profile: %w", err)
 	}
 	runtime.SetMutexProfileFraction(20)
 	return nil
@@ -276,14 +272,14 @@ func (b *writeBenchmark) stopProfiling() error {
 	}
 	if b.memprof != nil {
 		if err := pprof.Lookup("heap").WriteTo(b.memprof, 0); err != nil {
-			return fmt.Errorf("error writing mem profile: %v", err)
+			return fmt.Errorf("error writing mem profile: %w", err)
 		}
 		b.memprof.Close()
 		b.memprof = nil
 	}
 	if b.blockprof != nil {
 		if err := pprof.Lookup("block").WriteTo(b.blockprof, 0); err != nil {
-			return fmt.Errorf("error writing block profile: %v", err)
+			return fmt.Errorf("error writing block profile: %w", err)
 		}
 		b.blockprof.Close()
 		b.blockprof = nil
@@ -291,7 +287,7 @@ func (b *writeBenchmark) stopProfiling() error {
 	}
 	if b.mtxprof != nil {
 		if err := pprof.Lookup("mutex").WriteTo(b.mtxprof, 0); err != nil {
-			return fmt.Errorf("error writing mutex profile: %v", err)
+			return fmt.Errorf("error writing mutex profile: %w", err)
 		}
 		b.mtxprof.Close()
 		b.mtxprof = nil
@@ -319,7 +315,7 @@ func readPrometheusLabels(r io.Reader, n int) ([]labels.Labels, error) {
 	i := 0
 
 	for scanner.Scan() && i < n {
-		m := make(labels.Labels, 0, 10)
+		m := make([]labels.Label, 0, 10)
 
 		r := strings.NewReplacer("\"", "", "{", "", "}", "")
 		s := r.Replace(scanner.Text())
@@ -329,13 +325,12 @@ func readPrometheusLabels(r io.Reader, n int) ([]labels.Labels, error) {
 			split := strings.Split(labelChunk, ":")
 			m = append(m, labels.Label{Name: split[0], Value: split[1]})
 		}
-		// Order of the k/v labels matters, don't assume we'll always receive them already sorted.
-		sort.Sort(m)
-		h := m.Hash()
+		ml := labels.New(m...) // This sorts by name - order of the k/v labels matters, don't assume we'll always receive them already sorted.
+		h := ml.Hash()
 		if _, ok := hashes[h]; ok {
 			continue
 		}
-		mets = append(mets, m)
+		mets = append(mets, ml)
 		hashes[h] = struct{}{}
 		i++
 	}
@@ -423,7 +418,7 @@ func openBlock(path, blockID string) (*tsdb.DBReadOnly, tsdb.BlockReader, error)
 	return db, block, nil
 }
 
-func analyzeBlock(path, blockID string, limit int) error {
+func analyzeBlock(path, blockID string, limit int, runExtended bool) error {
 	db, block, err := openBlock(path, blockID)
 	if err != nil {
 		return err
@@ -474,21 +469,21 @@ func analyzeBlock(path, blockID string, limit int) error {
 	if err != nil {
 		return err
 	}
-	lbls := labels.Labels{}
 	chks := []chunks.Meta{}
+	builder := labels.ScratchBuilder{}
 	for p.Next() {
-		if err = ir.Series(p.At(), &lbls, &chks); err != nil {
+		if err = ir.Series(p.At(), &builder, &chks); err != nil {
 			return err
 		}
 		// Amount of the block time range not covered by this series.
 		uncovered := uint64(meta.MaxTime-meta.MinTime) - uint64(chks[len(chks)-1].MaxTime-chks[0].MinTime)
-		for _, lbl := range lbls {
+		builder.Labels().Range(func(lbl labels.Label) {
 			key := lbl.Name + "=" + lbl.Value
 			labelsUncovered[lbl.Name] += uncovered
 			labelpairsUncovered[key] += uncovered
 			labelpairsCount[key]++
 			entries++
-		}
+		})
 	}
 	if p.Err() != nil {
 		return p.Err()
@@ -568,6 +563,64 @@ func analyzeBlock(path, blockID string, limit int) error {
 	}
 	fmt.Printf("\nHighest cardinality metric names:\n")
 	printInfo(postingInfos)
+
+	if runExtended {
+		return analyzeCompaction(block, ir)
+	}
+
+	return nil
+}
+
+func analyzeCompaction(block tsdb.BlockReader, indexr tsdb.IndexReader) (err error) {
+	postingsr, err := indexr.Postings(index.AllPostingsKey())
+	if err != nil {
+		return err
+	}
+	chunkr, err := block.Chunks()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		err = tsdb_errors.NewMulti(err, chunkr.Close()).Err()
+	}()
+
+	const maxSamplesPerChunk = 120
+	nBuckets := 10
+	histogram := make([]int, nBuckets)
+	totalChunks := 0
+	var builder labels.ScratchBuilder
+	for postingsr.Next() {
+		var chks []chunks.Meta
+		if err := indexr.Series(postingsr.At(), &builder, &chks); err != nil {
+			return err
+		}
+
+		for _, chk := range chks {
+			// Load the actual data of the chunk.
+			chk, err := chunkr.Chunk(chk)
+			if err != nil {
+				return err
+			}
+			chunkSize := math.Min(float64(chk.NumSamples()), maxSamplesPerChunk)
+			// Calculate the bucket for the chunk and increment it in the histogram.
+			bucket := int(math.Ceil(float64(nBuckets)*chunkSize/maxSamplesPerChunk)) - 1
+			histogram[bucket]++
+			totalChunks++
+		}
+	}
+
+	fmt.Printf("\nCompaction analysis:\n")
+	fmt.Println("Fullness: Amount of samples in chunks (100% is 120 samples)")
+	// Normalize absolute counts to percentages and print them out.
+	for bucket, count := range histogram {
+		percentage := 100.0 * count / totalChunks
+		fmt.Printf("%7d%%: ", (bucket+1)*10)
+		for j := 0; j < percentage; j++ {
+			fmt.Printf("#")
+		}
+		fmt.Println()
+	}
+
 	return nil
 }
 
@@ -590,8 +643,8 @@ func dumpSamples(path string, mint, maxt int64) (err error) {
 	for ss.Next() {
 		series := ss.At()
 		lbs := series.Labels()
-		it := series.Iterator()
-		for it.Next() {
+		it := series.Iterator(nil)
+		for it.Next() == chunkenc.ValFloat {
 			ts, val := it.At()
 			fmt.Printf("%s %g %d\n", lbs, val, ts)
 		}
@@ -618,16 +671,16 @@ func checkErr(err error) int {
 	return 0
 }
 
-func backfillOpenMetrics(path string, outputDir string, humanReadable bool) int {
+func backfillOpenMetrics(path, outputDir string, humanReadable, quiet bool, maxBlockDuration time.Duration) int {
 	inputFile, err := fileutil.OpenMmapFile(path)
 	if err != nil {
 		return checkErr(err)
 	}
 	defer inputFile.Close()
 
-	if err := os.MkdirAll(outputDir, 0777); err != nil {
-		return checkErr(errors.Wrap(err, "create output dir"))
+	if err := os.MkdirAll(outputDir, 0o777); err != nil {
+		return checkErr(fmt.Errorf("create output dir: %w", err))
 	}
 
-	return checkErr(backfill(5000, inputFile.Bytes(), outputDir, humanReadable))
+	return checkErr(backfill(5000, inputFile.Bytes(), outputDir, humanReadable, quiet, maxBlockDuration))
 }

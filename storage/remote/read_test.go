@@ -15,27 +15,23 @@ package remote
 
 import (
 	"context"
-	"io/ioutil"
+	"fmt"
 	"net/url"
-	"os"
 	"sort"
 	"testing"
 
-	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	config_util "github.com/prometheus/common/config"
 	"github.com/stretchr/testify/require"
 
 	"github.com/prometheus/prometheus/config"
-	"github.com/prometheus/prometheus/pkg/labels"
+	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/prompb"
 	"github.com/prometheus/prometheus/storage"
 )
 
 func TestNoDuplicateReadConfigs(t *testing.T) {
-	dir, err := ioutil.TempDir("", "TestNoDuplicateReadConfigs")
-	require.NoError(t, err)
-	defer os.RemoveAll(dir)
+	dir := t.TempDir()
 
 	cfg1 := config.RemoteReadConfig{
 		Name: "write-1",
@@ -114,7 +110,7 @@ func TestExternalLabelsQuerierAddExternalLabels(t *testing.T) {
 		el          labels.Labels
 		inMatchers  []*labels.Matcher
 		outMatchers []*labels.Matcher
-		added       labels.Labels
+		added       []string
 	}{
 		{
 			inMatchers: []*labels.Matcher{
@@ -123,13 +119,10 @@ func TestExternalLabelsQuerierAddExternalLabels(t *testing.T) {
 			outMatchers: []*labels.Matcher{
 				labels.MustNewMatcher(labels.MatchEqual, "job", "api-server"),
 			},
-			added: labels.Labels{},
+			added: []string{},
 		},
 		{
-			el: labels.Labels{
-				{Name: "dc", Value: "berlin-01"},
-				{Name: "region", Value: "europe"},
-			},
+			el: labels.FromStrings("dc", "berlin-01", "region", "europe"),
 			inMatchers: []*labels.Matcher{
 				labels.MustNewMatcher(labels.MatchEqual, "job", "api-server"),
 			},
@@ -138,16 +131,10 @@ func TestExternalLabelsQuerierAddExternalLabels(t *testing.T) {
 				labels.MustNewMatcher(labels.MatchEqual, "region", "europe"),
 				labels.MustNewMatcher(labels.MatchEqual, "dc", "berlin-01"),
 			},
-			added: labels.Labels{
-				{Name: "dc", Value: "berlin-01"},
-				{Name: "region", Value: "europe"},
-			},
+			added: []string{"dc", "region"},
 		},
 		{
-			el: labels.Labels{
-				{Name: "region", Value: "europe"},
-				{Name: "dc", Value: "berlin-01"},
-			},
+			el: labels.FromStrings("dc", "berlin-01", "region", "europe"),
 			inMatchers: []*labels.Matcher{
 				labels.MustNewMatcher(labels.MatchEqual, "job", "api-server"),
 				labels.MustNewMatcher(labels.MatchEqual, "dc", "munich-02"),
@@ -157,9 +144,7 @@ func TestExternalLabelsQuerierAddExternalLabels(t *testing.T) {
 				labels.MustNewMatcher(labels.MatchEqual, "region", "europe"),
 				labels.MustNewMatcher(labels.MatchEqual, "dc", "munich-02"),
 			},
-			added: labels.Labels{
-				{Name: "region", Value: "europe"},
-			},
+			added: []string{"region"},
 		},
 	}
 
@@ -178,12 +163,12 @@ func TestExternalLabelsQuerierAddExternalLabels(t *testing.T) {
 func TestSeriesSetFilter(t *testing.T) {
 	tests := []struct {
 		in       *prompb.QueryResult
-		toRemove labels.Labels
+		toRemove []string
 
 		expected *prompb.QueryResult
 	}{
 		{
-			toRemove: labels.Labels{{Name: "foo", Value: "bar"}},
+			toRemove: []string{"foo"},
 			in: &prompb.QueryResult{
 				Timeseries: []*prompb.TimeSeries{
 					{Labels: labelsToLabelsProto(labels.FromStrings("foo", "bar", "a", "b"), nil), Samples: []prompb.Sample{}},
@@ -213,7 +198,7 @@ type mockedRemoteClient struct {
 
 func (c *mockedRemoteClient) Read(_ context.Context, query *prompb.Query) (*prompb.QueryResult, error) {
 	if c.got != nil {
-		return nil, errors.Errorf("expected only one call to remote client got: %v", query)
+		return nil, fmt.Errorf("expected only one call to remote client got: %v", query)
 	}
 	c.got = query
 
@@ -297,10 +282,8 @@ func TestSampleAndChunkQueryableClient(t *testing.T) {
 			matchers: []*labels.Matcher{
 				labels.MustNewMatcher(labels.MatchNotEqual, "a", "something"),
 			},
-			readRecent: true,
-			externalLabels: labels.Labels{
-				{Name: "region", Value: "europe"},
-			},
+			readRecent:     true,
+			externalLabels: labels.FromStrings("region", "europe"),
 
 			expectedQuery: &prompb.Query{
 				StartTimestampMs: 1,
@@ -322,10 +305,8 @@ func TestSampleAndChunkQueryableClient(t *testing.T) {
 				labels.MustNewMatcher(labels.MatchNotEqual, "a", "something"),
 				labels.MustNewMatcher(labels.MatchEqual, "region", "europe"),
 			},
-			readRecent: true,
-			externalLabels: labels.Labels{
-				{Name: "region", Value: "europe"},
-			},
+			readRecent:     true,
+			externalLabels: labels.FromStrings("region", "europe"),
 
 			expectedQuery: &prompb.Query{
 				StartTimestampMs: 1,
@@ -347,10 +328,8 @@ func TestSampleAndChunkQueryableClient(t *testing.T) {
 				labels.MustNewMatcher(labels.MatchNotEqual, "a", "something"),
 				labels.MustNewMatcher(labels.MatchEqual, "region", "us"),
 			},
-			readRecent: true,
-			externalLabels: labels.Labels{
-				{Name: "region", Value: "europe"},
-			},
+			readRecent:     true,
+			externalLabels: labels.FromStrings("region", "europe"),
 
 			expectedQuery: &prompb.Query{
 				StartTimestampMs: 1,
@@ -506,7 +485,6 @@ func TestSampleAndChunkQueryableClient(t *testing.T) {
 			}
 			require.NoError(t, ss.Err())
 			require.Equal(t, tc.expectedSeries, got)
-
 		})
 	}
 }

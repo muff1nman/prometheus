@@ -15,8 +15,8 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -25,12 +25,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-kit/kit/log"
-	"github.com/pkg/errors"
+	"github.com/go-kit/log"
 	"github.com/prometheus/common/model"
-	yaml "gopkg.in/yaml.v2"
+	"gopkg.in/yaml.v2"
 
-	"github.com/prometheus/prometheus/pkg/labels"
+	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/promql"
 	"github.com/prometheus/prometheus/promql/parser"
 	"github.com/prometheus/prometheus/rules"
@@ -39,14 +38,15 @@ import (
 
 // RulesUnitTest does unit testing of rules based on the unit testing files provided.
 // More info about the file format can be found in the docs.
-func RulesUnitTest(files ...string) int {
+func RulesUnitTest(queryOpts promql.LazyLoaderOpts, files ...string) int {
 	failed := false
 
 	for _, f := range files {
-		if errs := ruleUnitTest(f); errs != nil {
+		if errs := ruleUnitTest(f, queryOpts); errs != nil {
 			fmt.Fprintln(os.Stderr, "  FAILED:")
 			for _, e := range errs {
 				fmt.Fprintln(os.Stderr, e.Error())
+				fmt.Println()
 			}
 			failed = true
 		} else {
@@ -55,15 +55,15 @@ func RulesUnitTest(files ...string) int {
 		fmt.Println()
 	}
 	if failed {
-		return 1
+		return failureExitCode
 	}
-	return 0
+	return successExitCode
 }
 
-func ruleUnitTest(filename string) []error {
+func ruleUnitTest(filename string, queryOpts promql.LazyLoaderOpts) []error {
 	fmt.Println("Unit Testing: ", filename)
 
-	b, err := ioutil.ReadFile(filename)
+	b, err := os.ReadFile(filename)
 	if err != nil {
 		return []error{err}
 	}
@@ -87,7 +87,7 @@ func ruleUnitTest(filename string) []error {
 	groupOrderMap := make(map[string]int)
 	for i, gn := range unitTestInp.GroupEvalOrder {
 		if _, ok := groupOrderMap[gn]; ok {
-			return []error{errors.Errorf("group name repeated in evaluation order: %s", gn)}
+			return []error{fmt.Errorf("group name repeated in evaluation order: %s", gn)}
 		}
 		groupOrderMap[gn] = i
 	}
@@ -95,7 +95,7 @@ func ruleUnitTest(filename string) []error {
 	// Testing.
 	var errs []error
 	for _, t := range unitTestInp.Tests {
-		ers := t.test(evalInterval, groupOrderMap, unitTestInp.RuleFiles...)
+		ers := t.test(evalInterval, groupOrderMap, queryOpts, unitTestInp.RuleFiles...)
 		if ers != nil {
 			errs = append(errs, ers...)
 		}
@@ -146,17 +146,19 @@ type testGroup struct {
 	AlertRuleTests  []alertTestCase  `yaml:"alert_rule_test,omitempty"`
 	PromqlExprTests []promqlTestCase `yaml:"promql_expr_test,omitempty"`
 	ExternalLabels  labels.Labels    `yaml:"external_labels,omitempty"`
+	ExternalURL     string           `yaml:"external_url,omitempty"`
 	TestGroupName   string           `yaml:"name,omitempty"`
 }
 
 // test performs the unit tests.
-func (tg *testGroup) test(evalInterval time.Duration, groupOrderMap map[string]int, ruleFiles ...string) []error {
+func (tg *testGroup) test(evalInterval time.Duration, groupOrderMap map[string]int, queryOpts promql.LazyLoaderOpts, ruleFiles ...string) []error {
 	// Setup testing suite.
-	suite, err := promql.NewLazyLoader(nil, tg.seriesLoadingString())
+	suite, err := promql.NewLazyLoader(nil, tg.seriesLoadingString(), queryOpts)
 	if err != nil {
 		return []error{err}
 	}
 	defer suite.Close()
+	suite.SubqueryInterval = evalInterval
 
 	// Load the rule files.
 	opts := &rules.ManagerOptions{
@@ -167,7 +169,7 @@ func (tg *testGroup) test(evalInterval time.Duration, groupOrderMap map[string]i
 		Logger:     log.NewNopLogger(),
 	}
 	m := rules.NewManager(opts)
-	groupsMap, ers := m.LoadGroups(time.Duration(tg.Interval), tg.ExternalLabels, ruleFiles...)
+	groupsMap, ers := m.LoadGroups(time.Duration(tg.Interval), tg.ExternalLabels, tg.ExternalURL, nil, ruleFiles...)
 	if ers != nil {
 		return ers
 	}
@@ -188,6 +190,13 @@ func (tg *testGroup) test(evalInterval time.Duration, groupOrderMap map[string]i
 	// Map of all the unit tests for given eval_time.
 	alertTests := make(map[model.Duration][]alertTestCase)
 	for _, alert := range tg.AlertRuleTests {
+		if alert.Alertname == "" {
+			var testGroupLog string
+			if tg.TestGroupName != "" {
+				testGroupLog = fmt.Sprintf(" (in TestGroup %s)", tg.TestGroupName)
+			}
+			return []error{fmt.Errorf("an item under alert_rule_test misses required attribute alertname at eval_time %v%s", alert.EvalTime, testGroupLog)}
+		}
 		alertEvalTimesMap[alert.EvalTime] = struct{}{}
 
 		if _, ok := alertsInTest[alert.EvalTime]; !ok {
@@ -221,6 +230,7 @@ func (tg *testGroup) test(evalInterval time.Duration, groupOrderMap map[string]i
 	var errs []error
 	for ts := mint; ts.Before(maxt) || ts.Equal(maxt); ts = ts.Add(evalInterval) {
 		// Collects the alerts asked for unit testing.
+		var evalErrs []error
 		suite.WithSamplesTill(ts, func(err error) {
 			if err != nil {
 				errs = append(errs, err)
@@ -230,19 +240,22 @@ func (tg *testGroup) test(evalInterval time.Duration, groupOrderMap map[string]i
 				g.Eval(suite.Context(), ts)
 				for _, r := range g.Rules() {
 					if r.LastError() != nil {
-						errs = append(errs, errors.Errorf("    rule: %s, time: %s, err: %v",
+						evalErrs = append(evalErrs, fmt.Errorf("    rule: %s, time: %s, err: %v",
 							r.Name(), ts.Sub(time.Unix(0, 0).UTC()), r.LastError()))
 					}
 				}
 			}
 		})
-		if len(errs) > 0 {
+		errs = append(errs, evalErrs...)
+		// Only end testing at this point if errors occurred evaluating above,
+		// rather than any test failures already collected in errs.
+		if len(evalErrs) > 0 {
 			return errs
 		}
 
 		for {
 			if !(curr < len(alertEvalTimes) && ts.Sub(mint) <= time.Duration(alertEvalTimes[curr]) &&
-				time.Duration(alertEvalTimes[curr]) < ts.Add(time.Duration(evalInterval)).Sub(mint)) {
+				time.Duration(alertEvalTimes[curr]) < ts.Add(evalInterval).Sub(mint)) {
 				break
 			}
 
@@ -271,8 +284,8 @@ func (tg *testGroup) test(evalInterval time.Duration, groupOrderMap map[string]i
 					for _, a := range ar.ActiveAlerts() {
 						if a.State == rules.StateFiring {
 							alerts = append(alerts, labelAndAnnotation{
-								Labels:      append(labels.Labels{}, a.Labels...),
-								Annotations: append(labels.Labels{}, a.Annotations...),
+								Labels:      a.Labels.Copy(),
+								Annotations: a.Annotations.Copy(),
 							})
 						}
 					}
@@ -300,30 +313,18 @@ func (tg *testGroup) test(evalInterval time.Duration, groupOrderMap map[string]i
 					})
 				}
 
-				var sb strings.Builder
-				if gotAlerts.Len() != expAlerts.Len() {
+				sort.Sort(gotAlerts)
+				sort.Sort(expAlerts)
+
+				if !reflect.DeepEqual(expAlerts, gotAlerts) {
+					var testName string
 					if tg.TestGroupName != "" {
-						fmt.Fprintf(&sb, "    name: %s,\n", tg.TestGroupName)
+						testName = fmt.Sprintf("    name: %s,\n", tg.TestGroupName)
 					}
-					fmt.Fprintf(&sb, "    alertname:%s, time:%s, \n", testcase.Alertname, testcase.EvalTime.String())
-					fmt.Fprintf(&sb, "        exp:%#v, \n", expAlerts.String())
-					fmt.Fprintf(&sb, "        got:%#v", gotAlerts.String())
-
-					errs = append(errs, errors.New(sb.String()))
-				} else {
-					sort.Sort(gotAlerts)
-					sort.Sort(expAlerts)
-
-					if !reflect.DeepEqual(expAlerts, gotAlerts) {
-						if tg.TestGroupName != "" {
-							fmt.Fprintf(&sb, "    name: %s,\n", tg.TestGroupName)
-						}
-						fmt.Fprintf(&sb, "    alertname:%s, time:%s, \n", testcase.Alertname, testcase.EvalTime.String())
-						fmt.Fprintf(&sb, "        exp:%#v, \n", expAlerts.String())
-						fmt.Fprintf(&sb, "        got:%#v", gotAlerts.String())
-
-						errs = append(errs, errors.New(sb.String()))
-					}
+					expString := indentLines(expAlerts.String(), "            ")
+					gotString := indentLines(gotAlerts.String(), "            ")
+					errs = append(errs, fmt.Errorf("%s    alertname: %s, time: %s, \n        exp:%v, \n        got:%v",
+						testName, testcase.Alertname, testcase.EvalTime.String(), expString, gotString))
 				}
 			}
 
@@ -337,7 +338,7 @@ Outer:
 		got, err := query(suite.Context(), testCase.Expr, mint.Add(time.Duration(testCase.EvalTime)),
 			suite.QueryEngine(), suite.Queryable())
 		if err != nil {
-			errs = append(errs, errors.Errorf("    expr: %q, time: %s, err: %s", testCase.Expr,
+			errs = append(errs, fmt.Errorf("    expr: %q, time: %s, err: %s", testCase.Expr,
 				testCase.EvalTime.String(), err.Error()))
 			continue
 		}
@@ -354,9 +355,9 @@ Outer:
 		for _, s := range testCase.ExpSamples {
 			lb, err := parser.ParseMetric(s.Labels)
 			if err != nil {
-				err = errors.Wrapf(err, "labels %q", s.Labels)
-				errs = append(errs, errors.Errorf("    expr: %q, time: %s, err: %s", testCase.Expr,
-					testCase.EvalTime.String(), err.Error()))
+				err = fmt.Errorf("labels %q: %w", s.Labels, err)
+				errs = append(errs, fmt.Errorf("    expr: %q, time: %s, err: %w", testCase.Expr,
+					testCase.EvalTime.String(), err))
 				continue Outer
 			}
 			expSamples = append(expSamples, parsedSample{
@@ -372,7 +373,7 @@ Outer:
 			return labels.Compare(gotSamples[i].Labels, gotSamples[j].Labels) <= 0
 		})
 		if !reflect.DeepEqual(expSamples, gotSamples) {
-			errs = append(errs, errors.Errorf("    expr: %q, time: %s,\n        exp:%#v\n        got:%#v", testCase.Expr,
+			errs = append(errs, fmt.Errorf("    expr: %q, time: %s,\n        exp: %v\n        got: %v", testCase.Expr,
 				testCase.EvalTime.String(), parsedSamplesString(expSamples), parsedSamplesString(gotSamples)))
 		}
 	}
@@ -385,7 +386,6 @@ Outer:
 
 // seriesLoadingString returns the input series in PromQL notation.
 func (tg *testGroup) seriesLoadingString() string {
-
 	result := fmt.Sprintf("load %v\n", shortDuration(tg.Interval))
 	for _, is := range tg.InputSeries {
 		result += fmt.Sprintf("  %v %v\n", is.Series, is.Values)
@@ -434,7 +434,7 @@ func (tg *testGroup) maxEvalTime() time.Duration {
 }
 
 func query(ctx context.Context, qs string, t time.Time, engine *promql.Engine, qu storage.Queryable) (promql.Vector, error) {
-	q, err := engine.NewInstantQuery(qu, qs, t)
+	q, err := engine.NewInstantQuery(qu, nil, qs, t)
 	if err != nil {
 		return nil, err
 	}
@@ -447,12 +447,29 @@ func query(ctx context.Context, qs string, t time.Time, engine *promql.Engine, q
 		return v, nil
 	case promql.Scalar:
 		return promql.Vector{promql.Sample{
-			Point:  promql.Point(v),
+			Point:  promql.Point{T: v.T, V: v.V},
 			Metric: labels.Labels{},
 		}}, nil
 	default:
 		return nil, errors.New("rule result is not a vector or scalar")
 	}
+}
+
+// indentLines prefixes each line in the supplied string with the given "indent"
+// string.
+func indentLines(lines, indent string) string {
+	sb := strings.Builder{}
+	n := strings.Split(lines, "\n")
+	for i, l := range n {
+		if i > 0 {
+			sb.WriteString(indent)
+		}
+		sb.WriteString(l)
+		if i != len(n)-1 {
+			sb.WriteRune('\n')
+		}
+	}
+	return sb.String()
 }
 
 type labelsAndAnnotations []labelAndAnnotation
@@ -471,11 +488,11 @@ func (la labelsAndAnnotations) String() string {
 	if len(la) == 0 {
 		return "[]"
 	}
-	s := "[" + la[0].String()
-	for _, l := range la[1:] {
-		s += ", " + l.String()
+	s := "[\n0:" + indentLines("\n"+la[0].String(), "  ")
+	for i, l := range la[1:] {
+		s += ",\n" + fmt.Sprintf("%d", i+1) + ":" + indentLines("\n"+l.String(), "  ")
 	}
-	s += "]"
+	s += "\n]"
 
 	return s
 }
@@ -486,7 +503,7 @@ type labelAndAnnotation struct {
 }
 
 func (la *labelAndAnnotation) String() string {
-	return "Labels:" + la.Labels.String() + " Annotations:" + la.Annotations.String()
+	return "Labels:" + la.Labels.String() + "\nAnnotations:" + la.Annotations.String()
 }
 
 type series struct {

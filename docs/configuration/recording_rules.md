@@ -17,6 +17,10 @@ Rule files use YAML.
 The rule files can be reloaded at runtime by sending `SIGHUP` to the Prometheus
 process. The changes are only applied if all rule files are well-formatted.
 
+_Note about native histograms (experimental feature): Rules evaluating to
+native histograms do not yet work as expected. Instead of a native histogram,
+the sample stored is just a floating point value of zero._
+
 ## Syntax-checking rules
 
 To quickly check whether a rule file is syntactically correct without starting
@@ -78,6 +82,10 @@ name: <string>
 # How often rules in the group are evaluated.
 [ interval: <duration> | default = global.evaluation_interval ]
 
+# Limit the number of alerts an alerting rule and series a recording
+# rule can produce. 0 is no limit.
+[ limit: <int> | default = 0 ]
+
 rules:
   [ - <rule> ... ]
 ```
@@ -124,3 +132,14 @@ annotations:
   [ <labelname>: <tmpl_string> ]
 ```
 
+See also the
+[best practices for naming metrics created by recording rules](https://prometheus.io/docs/practices/rules/#recording-rules).
+
+# Limiting alerts and series
+
+A limit for alerts produced by alerting rules and series produced recording rules
+can be configured per-group. When the limit is exceeded, _all_ series produced
+by the rule are discarded, and if it's an alerting rule, _all_ alerts for
+the rule, active, pending, or inactive, are cleared as well. The event will be
+recorded as an error in the evaluation, and as such no stale markers are
+written.

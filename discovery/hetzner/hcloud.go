@@ -21,7 +21,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/go-kit/kit/log"
+	"github.com/go-kit/log"
 	"github.com/hetznercloud/hcloud-go/hcloud"
 	"github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
@@ -47,6 +47,7 @@ const (
 	hetznerLabelHcloudDiskGB                        = hetznerHcloudLabelPrefix + "disk_size_gb"
 	hetznerLabelHcloudType                          = hetznerHcloudLabelPrefix + "server_type"
 	hetznerLabelHcloudLabel                         = hetznerHcloudLabelPrefix + "label_"
+	hetznerLabelHcloudLabelPresent                  = hetznerHcloudLabelPrefix + "labelpresent_"
 )
 
 // Discovery periodically performs Hetzner Cloud requests. It implements
@@ -63,7 +64,7 @@ func newHcloudDiscovery(conf *SDConfig, logger log.Logger) (*hcloudDiscovery, er
 		port: conf.Port,
 	}
 
-	rt, err := config.NewRoundTripperFromConfig(conf.HTTPClientConfig, "hetzner_sd", false, false)
+	rt, err := config.NewRoundTripperFromConfig(conf.HTTPClientConfig, "hetzner_sd")
 	if err != nil {
 		return nil, err
 	}
@@ -77,6 +78,7 @@ func newHcloudDiscovery(conf *SDConfig, logger log.Logger) (*hcloudDiscovery, er
 	)
 	return d, nil
 }
+
 func (d *hcloudDiscovery) refresh(ctx context.Context) ([]*targetgroup.Group, error) {
 	servers, err := d.client.Server.All(ctx)
 	if err != nil {
@@ -124,6 +126,9 @@ func (d *hcloudDiscovery) refresh(ctx context.Context) ([]*targetgroup.Group, er
 			}
 		}
 		for labelKey, labelValue := range server.Labels {
+			presentLabel := model.LabelName(hetznerLabelHcloudLabelPresent + strutil.SanitizeLabelName(labelKey))
+			labels[presentLabel] = model.LabelValue("true")
+
 			label := model.LabelName(hetznerLabelHcloudLabel + strutil.SanitizeLabelName(labelKey))
 			labels[label] = model.LabelValue(labelValue)
 		}

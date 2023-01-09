@@ -17,7 +17,6 @@ import (
 	"context"
 	"fmt"
 	"hash/crc32"
-	"io/ioutil"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -28,7 +27,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 
-	"github.com/prometheus/prometheus/pkg/labels"
+	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/prometheus/prometheus/tsdb/chunks"
 	"github.com/prometheus/prometheus/tsdb/encoding"
@@ -45,18 +45,18 @@ type series struct {
 }
 
 type mockIndex struct {
-	series   map[uint64]series
-	postings map[labels.Label][]uint64
+	series   map[storage.SeriesRef]series
+	postings map[labels.Label][]storage.SeriesRef
 	symbols  map[string]struct{}
 }
 
 func newMockIndex() mockIndex {
 	ix := mockIndex{
-		series:   make(map[uint64]series),
-		postings: make(map[labels.Label][]uint64),
+		series:   make(map[storage.SeriesRef]series),
+		postings: make(map[labels.Label][]storage.SeriesRef),
 		symbols:  make(map[string]struct{}),
 	}
-	ix.postings[allPostingsKey] = []uint64{}
+	ix.postings[allPostingsKey] = []storage.SeriesRef{}
 	return ix
 }
 
@@ -64,18 +64,18 @@ func (m mockIndex) Symbols() (map[string]struct{}, error) {
 	return m.symbols, nil
 }
 
-func (m mockIndex) AddSeries(ref uint64, l labels.Labels, chunks ...chunks.Meta) error {
+func (m mockIndex) AddSeries(ref storage.SeriesRef, l labels.Labels, chunks ...chunks.Meta) error {
 	if _, ok := m.series[ref]; ok {
 		return errors.Errorf("series with reference %d already added", ref)
 	}
-	for _, lbl := range l {
+	l.Range(func(lbl labels.Label) {
 		m.symbols[lbl.Name] = struct{}{}
 		m.symbols[lbl.Value] = struct{}{}
 		if _, ok := m.postings[lbl]; !ok {
-			m.postings[lbl] = []uint64{}
+			m.postings[lbl] = []storage.SeriesRef{}
 		}
 		m.postings[lbl] = append(m.postings[lbl], ref)
-	}
+	})
 	m.postings[allPostingsKey] = append(m.postings[allPostingsKey], ref)
 
 	s := series{l: l}
@@ -124,23 +124,19 @@ func (m mockIndex) SortedPostings(p Postings) Postings {
 	return NewListPostings(ep)
 }
 
-func (m mockIndex) Series(ref uint64, lset *labels.Labels, chks *[]chunks.Meta) error {
+func (m mockIndex) Series(ref storage.SeriesRef, builder *labels.ScratchBuilder, chks *[]chunks.Meta) error {
 	s, ok := m.series[ref]
 	if !ok {
 		return errors.New("not found")
 	}
-	*lset = append((*lset)[:0], s.l...)
+	builder.Assign(s.l)
 	*chks = append((*chks)[:0], s.chunks...)
 
 	return nil
 }
 
 func TestIndexRW_Create_Open(t *testing.T) {
-	dir, err := ioutil.TempDir("", "test_index_create")
-	require.NoError(t, err)
-	defer func() {
-		require.NoError(t, os.RemoveAll(dir))
-	}()
+	dir := t.TempDir()
 
 	fn := filepath.Join(dir, indexFilename)
 
@@ -154,7 +150,7 @@ func TestIndexRW_Create_Open(t *testing.T) {
 	require.NoError(t, ir.Close())
 
 	// Modify magic header must cause open to fail.
-	f, err := os.OpenFile(fn, os.O_WRONLY, 0666)
+	f, err := os.OpenFile(fn, os.O_WRONLY, 0o666)
 	require.NoError(t, err)
 	_, err = f.WriteAt([]byte{0, 0}, 0)
 	require.NoError(t, err)
@@ -165,11 +161,7 @@ func TestIndexRW_Create_Open(t *testing.T) {
 }
 
 func TestIndexRW_Postings(t *testing.T) {
-	dir, err := ioutil.TempDir("", "test_index_postings")
-	require.NoError(t, err)
-	defer func() {
-		require.NoError(t, os.RemoveAll(dir))
-	}()
+	dir := t.TempDir()
 
 	fn := filepath.Join(dir, indexFilename)
 
@@ -205,41 +197,44 @@ func TestIndexRW_Postings(t *testing.T) {
 	p, err := ir.Postings("a", "1")
 	require.NoError(t, err)
 
-	var l labels.Labels
 	var c []chunks.Meta
+	var builder labels.ScratchBuilder
 
 	for i := 0; p.Next(); i++ {
-		err := ir.Series(p.At(), &l, &c)
+		err := ir.Series(p.At(), &builder, &c)
 
 		require.NoError(t, err)
 		require.Equal(t, 0, len(c))
-		require.Equal(t, series[i], l)
+		require.Equal(t, series[i], builder.Labels())
 	}
 	require.NoError(t, p.Err())
 
-	// The label incides are no longer used, so test them by hand here.
-	labelIndices := map[string][]string{}
-	require.NoError(t, ReadOffsetTable(ir.b, ir.toc.LabelIndicesTable, func(key []string, off uint64, _ int) error {
-		if len(key) != 1 {
-			return errors.Errorf("unexpected key length for label indices table %d", len(key))
-		}
+	// The label indices are no longer used, so test them by hand here.
+	labelValuesOffsets := map[string]uint64{}
+	d := encoding.NewDecbufAt(ir.b, int(ir.toc.LabelIndicesTable), castagnoliTable)
+	cnt := d.Be32()
 
+	for d.Err() == nil && d.Len() > 0 && cnt > 0 {
+		require.Equal(t, 1, d.Uvarint(), "Unexpected number of keys for label indices table")
+		lbl := d.UvarintStr()
+		off := d.Uvarint64()
+		labelValuesOffsets[lbl] = off
+		cnt--
+	}
+	require.NoError(t, d.Err())
+
+	labelIndices := map[string][]string{}
+	for lbl, off := range labelValuesOffsets {
 		d := encoding.NewDecbufAt(ir.b, int(off), castagnoliTable)
-		vals := []string{}
-		nc := d.Be32int()
-		if nc != 1 {
-			return errors.Errorf("unexpected number of label indices table names %d", nc)
-		}
-		for i := d.Be32(); i > 0; i-- {
+		require.Equal(t, 1, d.Be32int(), "Unexpected number of label indices table names")
+		for i := d.Be32(); i > 0 && d.Err() == nil; i-- {
 			v, err := ir.lookupSymbol(d.Be32())
-			if err != nil {
-				return err
-			}
-			vals = append(vals, v)
+			require.NoError(t, err)
+			labelIndices[lbl] = append(labelIndices[lbl], v)
 		}
-		labelIndices[key[0]] = vals
-		return d.Err()
-	}))
+		require.NoError(t, d.Err())
+	}
+
 	require.Equal(t, map[string][]string{
 		"a": {"1"},
 		"b": {"1", "2", "3", "4"},
@@ -249,11 +244,7 @@ func TestIndexRW_Postings(t *testing.T) {
 }
 
 func TestPostingsMany(t *testing.T) {
-	dir, err := ioutil.TempDir("", "test_postings_many")
-	require.NoError(t, err)
-	defer func() {
-		require.NoError(t, os.RemoveAll(dir))
-	}()
+	dir := t.TempDir()
 
 	fn := filepath.Join(dir, indexFilename)
 
@@ -281,7 +272,7 @@ func TestPostingsMany(t *testing.T) {
 	}
 
 	for i, s := range series {
-		require.NoError(t, iw.AddSeries(uint64(i), s))
+		require.NoError(t, iw.AddSeries(storage.SeriesRef(i), s))
 	}
 	require.NoError(t, iw.Close())
 
@@ -320,16 +311,16 @@ func TestPostingsMany(t *testing.T) {
 		{in: []string{"126a", "126b", "127", "127a", "127b", "128", "128a", "128b", "129", "129a", "129b"}},
 	}
 
+	var builder labels.ScratchBuilder
 	for _, c := range cases {
 		it, err := ir.Postings("i", c.in...)
 		require.NoError(t, err)
 
 		got := []string{}
-		var lbls labels.Labels
 		var metas []chunks.Meta
 		for it.Next() {
-			require.NoError(t, ir.Series(it.At(), &lbls, &metas))
-			got = append(got, lbls.Get("i"))
+			require.NoError(t, ir.Series(it.At(), &builder, &metas))
+			got = append(got, builder.Labels().Get("i"))
 		}
 		require.NoError(t, it.Err())
 		exp := []string{}
@@ -340,15 +331,10 @@ func TestPostingsMany(t *testing.T) {
 		}
 		require.Equal(t, exp, got, fmt.Sprintf("input: %v", c.in))
 	}
-
 }
 
 func TestPersistence_index_e2e(t *testing.T) {
-	dir, err := ioutil.TempDir("", "test_persistence_e2e")
-	require.NoError(t, err)
-	defer func() {
-		require.NoError(t, os.RemoveAll(dir))
-	}()
+	dir := t.TempDir()
 
 	lbls, err := labels.ReadLabels(filepath.Join("..", "testdata", "20kseries.json"), 20000)
 	require.NoError(t, err)
@@ -358,10 +344,10 @@ func TestPersistence_index_e2e(t *testing.T) {
 
 	symbols := map[string]struct{}{}
 	for _, lset := range lbls {
-		for _, l := range lset {
+		lset.Range(func(l labels.Label) {
 			symbols[l.Name] = struct{}{}
 			symbols[l.Value] = struct{}{}
-		}
+		})
 	}
 
 	var input indexWriterSeriesSlice
@@ -374,7 +360,7 @@ func TestPersistence_index_e2e(t *testing.T) {
 			metas = append(metas, chunks.Meta{
 				MinTime: int64(j * 10000),
 				MaxTime: int64((j + 1) * 10000),
-				Ref:     rand.Uint64(),
+				Ref:     chunks.ChunkRef(rand.Uint64()),
 				Chunk:   chunkenc.NewXORChunk(),
 			})
 		}
@@ -405,19 +391,19 @@ func TestPersistence_index_e2e(t *testing.T) {
 	mi := newMockIndex()
 
 	for i, s := range input {
-		err = iw.AddSeries(uint64(i), s.labels, s.chunks...)
+		err = iw.AddSeries(storage.SeriesRef(i), s.labels, s.chunks...)
 		require.NoError(t, err)
-		require.NoError(t, mi.AddSeries(uint64(i), s.labels, s.chunks...))
+		require.NoError(t, mi.AddSeries(storage.SeriesRef(i), s.labels, s.chunks...))
 
-		for _, l := range s.labels {
+		s.labels.Range(func(l labels.Label) {
 			valset, ok := values[l.Name]
 			if !ok {
 				valset = map[string]struct{}{}
 				values[l.Name] = valset
 			}
 			valset[l.Value] = struct{}{}
-		}
-		postings.Add(uint64(i), s.labels)
+		})
+		postings.Add(storage.SeriesRef(i), s.labels)
 	}
 
 	err = iw.Close()
@@ -433,20 +419,20 @@ func TestPersistence_index_e2e(t *testing.T) {
 		expp, err := mi.Postings(p.Name, p.Value)
 		require.NoError(t, err)
 
-		var lset, explset labels.Labels
 		var chks, expchks []chunks.Meta
+		var builder, eBuilder labels.ScratchBuilder
 
 		for gotp.Next() {
 			require.True(t, expp.Next())
 
 			ref := gotp.At()
 
-			err := ir.Series(ref, &lset, &chks)
+			err := ir.Series(ref, &builder, &chks)
 			require.NoError(t, err)
 
-			err = mi.Series(expp.At(), &explset, &expchks)
+			err = mi.Series(expp.At(), &eBuilder, &expchks)
 			require.NoError(t, err)
-			require.Equal(t, explset, lset)
+			require.Equal(t, eBuilder.Labels(), builder.Labels())
 			require.Equal(t, expchks, chks)
 		}
 		require.False(t, expp.Next(), "Expected no more postings for %q=%q", p.Name, p.Value)
@@ -504,7 +490,7 @@ func TestNewFileReaderErrorNoOpenFiles(t *testing.T) {
 	dir := testutil.NewTemporaryDirectory("block", t)
 
 	idxName := filepath.Join(dir.Path(), "index")
-	err := ioutil.WriteFile(idxName, []byte("corrupted contents"), 0666)
+	err := os.WriteFile(idxName, []byte("corrupted contents"), 0o666)
 	require.NoError(t, err)
 
 	_, err = NewFileReader(idxName)
@@ -559,4 +545,9 @@ func TestSymbols(t *testing.T) {
 		i++
 	}
 	require.NoError(t, iter.Err())
+}
+
+func TestDecoder_Postings_WrongInput(t *testing.T) {
+	_, _, err := (&Decoder{}).Postings([]byte("the cake is a lie"))
+	require.Error(t, err)
 }

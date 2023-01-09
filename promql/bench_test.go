@@ -21,22 +21,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/prometheus/pkg/labels"
+	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/promql/parser"
+	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/util/teststorage"
 )
 
-func BenchmarkRangeQuery(b *testing.B) {
-	storage := teststorage.New(b)
-	defer storage.Close()
-	opts := EngineOpts{
-		Logger:     nil,
-		Reg:        nil,
-		MaxSamples: 50000000,
-		Timeout:    100 * time.Second,
-	}
-	engine := NewEngine(opts)
-
+func setupRangeQueryTestData(stor *teststorage.TestStorage, engine *Engine, interval, numIntervals int) error {
 	metrics := []labels.Labels{}
 	metrics = append(metrics, labels.FromStrings("__name__", "a_one"))
 	metrics = append(metrics, labels.FromStrings("__name__", "b_one"))
@@ -62,29 +53,28 @@ func BenchmarkRangeQuery(b *testing.B) {
 		}
 		metrics = append(metrics, labels.FromStrings("__name__", "h_hundred", "l", strconv.Itoa(i), "le", "+Inf"))
 	}
-	refs := make([]uint64, len(metrics))
-
-	// A day of data plus 10k steps.
-	numIntervals := 8640 + 10000
+	refs := make([]storage.SeriesRef, len(metrics))
 
 	for s := 0; s < numIntervals; s++ {
-		a := storage.Appender(context.Background())
-		ts := int64(s * 10000) // 10s interval.
+		a := stor.Appender(context.Background())
+		ts := int64(s * interval)
 		for i, metric := range metrics {
-			err := a.AddFast(refs[i], ts, float64(s))
-			if err != nil {
-				refs[i], _ = a.Add(metric, ts, float64(s))
-			}
+			ref, _ := a.Append(refs[i], metric, ts, float64(s)+float64(i)/float64(len(metrics)))
+			refs[i] = ref
 		}
 		if err := a.Commit(); err != nil {
-			b.Fatal(err)
+			return err
 		}
 	}
+	return nil
+}
 
-	type benchCase struct {
-		expr  string
-		steps int
-	}
+type benchCase struct {
+	expr  string
+	steps int
+}
+
+func rangeQueryCases() []benchCase {
 	cases := []benchCase{
 		// Plain retrieval.
 		{
@@ -132,6 +122,9 @@ func BenchmarkRangeQuery(b *testing.B) {
 		{
 			expr: "a_X unless b_X{l=~'.*[0-4]$'}",
 		},
+		{
+			expr: "a_X and b_X{l='notfound'}",
+		},
 		// Simple functions.
 		{
 			expr: "abs(a_X)",
@@ -158,6 +151,12 @@ func BenchmarkRangeQuery(b *testing.B) {
 		{
 			expr: "sum by (le)(h_X)",
 		},
+		{
+			expr: "count_values('value', h_X)",
+		},
+		{
+			expr: "topk(1, a_X)",
+		},
 		// Combinations.
 		{
 			expr: "rate(a_X[1m]) + rate(b_X[1m])",
@@ -170,6 +169,10 @@ func BenchmarkRangeQuery(b *testing.B) {
 		},
 		{
 			expr: "histogram_quantile(0.9, rate(h_X[5m]))",
+		},
+		// Many-to-one join.
+		{
+			expr: "a_X + on(l) group_right a_one",
 		},
 	}
 
@@ -198,14 +201,37 @@ func BenchmarkRangeQuery(b *testing.B) {
 			tmp = append(tmp, benchCase{expr: c.expr, steps: 1000})
 		}
 	}
-	cases = tmp
+	return tmp
+}
+
+func BenchmarkRangeQuery(b *testing.B) {
+	stor := teststorage.New(b)
+	defer stor.Close()
+	opts := EngineOpts{
+		Logger:     nil,
+		Reg:        nil,
+		MaxSamples: 50000000,
+		Timeout:    100 * time.Second,
+	}
+	engine := NewEngine(opts)
+
+	const interval = 10000 // 10s interval.
+	// A day of data plus 10k steps.
+	numIntervals := 8640 + 10000
+
+	err := setupRangeQueryTestData(stor, engine, interval, numIntervals)
+	if err != nil {
+		b.Fatal(err)
+	}
+	cases := rangeQueryCases()
+
 	for _, c := range cases {
 		name := fmt.Sprintf("expr=%s,steps=%d", c.expr, c.steps)
 		b.Run(name, func(b *testing.B) {
 			b.ReportAllocs()
 			for i := 0; i < b.N; i++ {
 				qry, err := engine.NewRangeQuery(
-					storage, c.expr,
+					stor, nil, c.expr,
 					time.Unix(int64((numIntervals-c.steps)*10), 0),
 					time.Unix(int64(numIntervals*10), 0), time.Second*10)
 				if err != nil {
