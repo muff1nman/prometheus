@@ -817,11 +817,11 @@ func schemaOverride(t reflect.Type) *jsonschema.Type {
 	if t == labelType {
 		return &jsonschema.Type{
 			Type: "object",
-			PatternProperties: map[string]*jsonschema.Type{
-				".*": {
-					Type: "string",
-				},
-			},
+			AdditionalProperties: []byte(`{
+        "type": [
+          "string",
+        ]
+      }`),
 		}
 	}
 	if t == durationType || t == regexpType || t == yamlNodeType {
