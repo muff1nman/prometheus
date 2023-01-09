@@ -582,7 +582,9 @@ func checkSDFile(filename string) ([]*targetgroup.Group, error) {
 			return nil, err
 		}
 	case ".yml", ".yaml":
-		if err := yaml.Unmarshal(content, &targetGroups); err != nil {
+		d := yaml.NewDecoder(bytes.NewBuffer(content))
+		d.KnownFields(true)
+		if err := d.Decode(&targetGroups); err != nil {
 			return nil, err
 		}
 	default:
