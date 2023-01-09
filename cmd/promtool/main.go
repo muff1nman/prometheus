@@ -810,14 +810,15 @@ func checkMetricsExtended(r io.Reader) ([]metricStat, int, error) {
 }
 
 func schemaOverride(t reflect.Type) *jsonschema.Type {
-	labelType := reflect.TypeOf((*labels.Labels)(nil)).Elem()
 	durationType := reflect.TypeOf((*model.Duration)(nil)).Elem()
 	regexpType := reflect.TypeOf((*relabel.Regexp)(nil)).Elem()
 	yamlNodeType := reflect.TypeOf((*yaml.Node)(nil)).Elem()
-	if t == labelType {
+	// Special handling of map[string]string types so that they are evaluated correctly by json2jsii
+	// Specifically, we do this for Labels and Annotations in rule defs
+	if t.Kind() == reflect.Map && t.Key().Kind() == reflect.String {
 		return &jsonschema.Type{
 			Type:                 "object",
-			AdditionalProperties: []byte(`{"type": ["string"]}`),
+			AdditionalProperties: []byte(`{"type": "string"}`),
 		}
 	}
 	if t == durationType || t == regexpType || t == yamlNodeType {
