@@ -86,8 +86,14 @@ require (
 )
 
 require (
+	github.com/alecthomas/jsonschema v0.0.0-20220216202328-9eeeec9d044b
+	github.com/google/pprof v0.0.0-20200708004538-1a94d8640e99
+)
+
+require (
 	cloud.google.com/go/compute/metadata v0.2.2 // indirect
 	github.com/coreos/go-systemd/v22 v22.4.0 // indirect
+	github.com/iancoleman/orderedmap v0.0.0-20190318233801-ac98e3ecb4b0 // indirect
 )
 
 require (
