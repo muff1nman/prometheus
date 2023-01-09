@@ -816,12 +816,8 @@ func schemaOverride(t reflect.Type) *jsonschema.Type {
 	yamlNodeType := reflect.TypeOf((*yaml.Node)(nil)).Elem()
 	if t == labelType {
 		return &jsonschema.Type{
-			Type: "object",
-			AdditionalProperties: []byte(`{
-        "type": [
-          "string",
-        ]
-      }`),
+			Type:                 "object",
+			AdditionalProperties: []byte(`{"type": ["string"]}`),
 		}
 	}
 	if t == durationType || t == regexpType || t == yamlNodeType {
