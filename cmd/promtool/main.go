@@ -44,6 +44,10 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/common/version"
 	"github.com/prometheus/exporter-toolkit/web"
+	"github.com/prometheus/prometheus/discovery"
+	"github.com/prometheus/prometheus/discovery/targetgroup"
+	"github.com/prometheus/prometheus/pkg/labels"
+	"github.com/prometheus/prometheus/pkg/relabel"
 	"gopkg.in/alecthomas/kingpin.v2"
 	"gopkg.in/yaml.v3"
 
@@ -822,6 +826,75 @@ func schemaOverride(t reflect.Type) *jsonschema.Type {
           "string",
         ]
       }`),
+		}
+	}
+	if t == durationType || t == regexpType || t == yamlNodeType {
+		return &jsonschema.Type{
+			Type: "string",
+		}
+	}
+	return nil
+}
+
+func schemaTypeName(t reflect.Type) string {
+	mainConfigType := reflect.TypeOf((*config.Config)(nil)).Elem()
+	if t == mainConfigType {
+		return "PrometheusConfig"
+	}
+	switch t.Name() {
+	case "SDConfig", "Config":
+		return strings.Title(path.Base(t.PkgPath())) + t.Name()
+	}
+	return ""
+}
+
+func schemaAddFields(t reflect.Type) []reflect.StructField {
+	scrapeConfig := reflect.TypeOf((*config.ScrapeConfig)(nil)).Elem()
+	alertConfig := reflect.TypeOf((*config.AlertmanagerConfig)(nil)).Elem()
+	group := reflect.TypeOf((*targetgroup.Group)(nil)).Elem()
+	if t == scrapeConfig || t == alertConfig {
+		return discovery.ConfigsAsFields()
+	}
+	if t == group {
+		return []reflect.StructField{
+			{
+				Name: "Targets",
+				Type: reflect.TypeOf((*[]string)(nil)).Elem(),
+			},
+		}
+	}
+	return nil
+}
+
+// OutputSchema renders a json schema for the given Type.
+func OutputSchema(t reflect.Type) int {
+	r := &jsonschema.Reflector{
+		TypeNamer:           schemaTypeName,
+		YAMLEmbeddedStructs: true,
+		TypeMapper:          schemaOverride,
+		AdditionalFields:    schemaAddFields,
+	}
+	schema := r.ReflectFromType(t)
+	err := json.NewEncoder(os.Stdout).Encode(schema)
+	if err != nil {
+		return 1
+	}
+	return 0
+}
+
+func schemaOverride(t reflect.Type) *jsonschema.Type {
+	labelType := reflect.TypeOf((*labels.Labels)(nil)).Elem()
+	durationType := reflect.TypeOf((*model.Duration)(nil)).Elem()
+	regexpType := reflect.TypeOf((*relabel.Regexp)(nil)).Elem()
+	yamlNodeType := reflect.TypeOf((*yaml.Node)(nil)).Elem()
+	if t == labelType {
+		return &jsonschema.Type{
+			Type: "object",
+			PatternProperties: map[string]*jsonschema.Type{
+				".*": {
+					Type: "string",
+				},
+			},
 		}
 	}
 	if t == durationType || t == regexpType || t == yamlNodeType {
