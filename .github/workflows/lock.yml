@@ -1,8 +1,6 @@
 name: 'Lock Threads'
 
 on:  # yamllint disable-line rule:truthy
-  schedule:
-    - cron: '13 23 * * *'
   workflow_dispatch:
 
 permissions:
