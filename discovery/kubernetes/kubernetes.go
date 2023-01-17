@@ -123,7 +123,7 @@ func (c *Role) UnmarshalYAML(unmarshal func(interface{}) error) error {
 type SDConfig struct {
 	APIServer          config.URL              `yaml:"api_server,omitempty"`
 	Role               Role                    `yaml:"role"`
-	KubeConfig         string                  `yaml:"kubeconfig_file"`
+	KubeConfig         string                  `yaml:"kubeconfig_file,omitempty"`
 	HTTPClientConfig   config.HTTPClientConfig `yaml:",inline"`
 	NamespaceDiscovery NamespaceDiscovery      `yaml:"namespaces,omitempty"`
 	Selectors          []SelectorConfig        `yaml:"selectors,omitempty"`
@@ -249,7 +249,7 @@ func (c *SDConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 // NamespaceDiscovery is the configuration for discovering
 // Kubernetes namespaces.
 type NamespaceDiscovery struct {
-	IncludeOwnNamespace bool     `yaml:"own_namespace"`
+	IncludeOwnNamespace bool     `yaml:"own_namespace,omitempty"`
 	Names               []string `yaml:"names"`
 }
 

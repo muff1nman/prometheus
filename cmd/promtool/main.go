@@ -809,23 +809,55 @@ func checkMetricsExtended(r io.Reader) ([]metricStat, int, error) {
 	return stats, total, nil
 }
 
-func schemaOverride(t reflect.Type) *jsonschema.Type {
-	durationType := reflect.TypeOf((*model.Duration)(nil)).Elem()
-	regexpType := reflect.TypeOf((*relabel.Regexp)(nil)).Elem()
-	yamlNodeType := reflect.TypeOf((*yaml.Node)(nil)).Elem()
-	// Special handling of map[string]string types so that they are evaluated correctly by json2jsii
-	// Specifically, we do this for Labels and Annotations in rule defs
-	if t.Kind() == reflect.Map && t.Key().Kind() == reflect.String {
+func handleMapString(t reflect.Type) *jsonschema.Type {
+	switch t.Elem().Kind() {
+	case reflect.Slice:
+		return &jsonschema.Type{
+			AdditionalProperties: []byte(`{ "type": "array", "items": { "type": "string" }}`),
+			Type:                 "object",
+		}
+	case reflect.String:
 		return &jsonschema.Type{
 			Type:                 "object",
 			AdditionalProperties: []byte(`{"type": "string"}`),
 		}
 	}
+	return nil
+}
+
+func schemaOverride(t reflect.Type) *jsonschema.Type {
+	durationType := reflect.TypeOf((*model.Duration)(nil)).Elem()
+	regexpType := reflect.TypeOf((*relabel.Regexp)(nil)).Elem()
+	yamlNodeType := reflect.TypeOf((*yaml.Node)(nil)).Elem()
+	labelList := reflect.TypeOf((*labels.Labels)(nil)).Elem()
+
 	if t == durationType || t == regexpType || t == yamlNodeType {
 		return &jsonschema.Type{
 			Type: "string",
 		}
 	}
+
+	// model/labels.Labels has special unmarshalling behavior that unmarshals a map of name:value pairs into a list of model/labels.Label structs
+	if t == labelList {
+		return &jsonschema.Type{
+			Type:                 "object",
+			AdditionalProperties: []byte(`{"type": "string"}`),
+		}
+	}
+
+	// Special handling of map[string]<something> types and slices of those types so that they are evaluated correctly by json2jsii
+	// Specifically, we do this for Labels and Annotations in rule defs,
+	// as well as some other places where map[string][]string isn't handled correctly
+	if t.Kind() == reflect.Map && t.Key().Kind() == reflect.String {
+		return handleMapString(t)
+	} else if t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Map && t.Elem().Key().Kind() == reflect.String {
+		mapType := handleMapString(t.Elem())
+		return &jsonschema.Type{
+			Type:  "array",
+			Items: mapType,
+		}
+	}
+
 	return nil
 }
 
@@ -848,10 +880,13 @@ func schemaAddFields(t reflect.Type) []reflect.StructField {
 	if t == scrapeConfig || t == alertConfig {
 		return discovery.ConfigsAsFields()
 	}
+
+	// There is special marshalling behavior in the discovery/targetgroup package that
+	// converts a list of addresses from the inputted string into LabelName:LabelValue pairs using a hard coded LabelName
 	if t == group {
 		return []reflect.StructField{
 			{
-				Name: "Targets",
+				Name: "targets",
 				Type: reflect.TypeOf((*[]string)(nil)).Elem(),
 			},
 		}
