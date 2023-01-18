@@ -88,6 +88,7 @@ require (
 require (
 	github.com/alecthomas/jsonschema v0.0.0-20220216202328-9eeeec9d044b
 	github.com/google/pprof v0.0.0-20200708004538-1a94d8640e99
+	k8s.io/apiextensions-apiserver v0.26.0
 )
 
 require (

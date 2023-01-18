@@ -46,6 +46,7 @@ import (
 	"github.com/prometheus/exporter-toolkit/web"
 	"gopkg.in/alecthomas/kingpin.v2"
 	"gopkg.in/yaml.v3"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
@@ -894,6 +895,24 @@ func schemaAddFields(t reflect.Type) []reflect.StructField {
 	return nil
 }
 
+func removeRequiredFields(schema *apiextensionsv1.JSONSchemaProps) {
+	fieldsToDelete := make([]int, 0)
+	for i, val := range schema.Required {
+		// These fields are optional, and have defaults set,
+		// but are not tagged with omitempty by upstream to ensure their false values are unmarshalled clearly
+		if val == "follow_redirects" || val == "enable_http2" {
+			fieldsToDelete = append(fieldsToDelete, i)
+		}
+	}
+
+	// Ensure we iterate through the array backwards to prevent changing the index numbers
+	sort.Ints(fieldsToDelete)
+	for i := len(fieldsToDelete) - 1; i >= 0; i-- {
+		indexToDelete := fieldsToDelete[i]
+		schema.Required = append(schema.Required[:indexToDelete], schema.Required[indexToDelete+1:]...)
+	}
+}
+
 // OutputSchema renders a json schema for the given Type.
 func OutputSchema(t reflect.Type) int {
 	r := &jsonschema.Reflector{
@@ -903,10 +922,18 @@ func OutputSchema(t reflect.Type) int {
 		AdditionalFields:    schemaAddFields,
 	}
 	schema := r.ReflectFromType(t)
-	err := json.NewEncoder(os.Stdout).Encode(schema)
+	schemaBytes, err := json.Marshal(schema)
 	if err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
 		return 1
 	}
+
+	parsedSchema, err := ParseSchemaFromBytes(schemaBytes, removeRequiredFields)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		return 1
+	}
+	fmt.Println(string(parsedSchema))
 	return 0
 }
 
