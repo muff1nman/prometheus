@@ -516,7 +516,7 @@ type TSDBConfig struct {
 	// OutOfOrderTimeWindowFlag holds the parsed duration from the config file.
 	// During unmarshall, this is converted into milliseconds and stored in OutOfOrderTimeWindow.
 	// This should not be used directly and must be converted into OutOfOrderTimeWindow.
-	OutOfOrderTimeWindowFlag model.Duration `yaml:"out_of_order_time_window,omitempty"`
+	OutOfOrderTimeWindowFlag model.Duration `yaml:"out_of_order_time_window,omitempty" jsonschema:"-"`
 }
 
 // UnmarshalYAML implements the yaml.Unmarshaler interface.

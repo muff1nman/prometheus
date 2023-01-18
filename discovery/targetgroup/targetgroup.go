@@ -26,10 +26,10 @@ type Group struct {
 	// uniquely identifiable in the group by its address label.
 	Targets []model.LabelSet `jsonschema:"-"`
 	// Labels is a set of labels that is common across all targets in the group.
-	Labels model.LabelSet
+	Labels model.LabelSet `yaml:"labels,omitempty"`
 
 	// Source is an identifier that describes a group of targets.
-	Source string
+	Source string `yaml:"source,omitempty"`
 }
 
 func (tg Group) String() string {
