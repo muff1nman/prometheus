@@ -1,6 +1,6 @@
 {
   "name": "@prometheus-io/codemirror-promql",
-  "version": "0.41.0-rc.0",
+  "version": "0.54.0-rc.1",
   "description": "a CodeMirror mode for the PromQL language",
   "types": "dist/esm/index.d.ts",
   "module": "dist/esm/index.js",
@@ -29,24 +29,23 @@
   },
   "homepage": "https://github.com/prometheus/prometheus/blob/main/web/ui/module/codemirror-promql/README.md",
   "dependencies": {
-    "@prometheus-io/lezer-promql": "^0.41.0-rc.0",
-    "lru-cache": "^6.0.0"
+    "@prometheus-io/lezer-promql": "0.54.0-rc.1",
+    "lru-cache": "^7.18.3"
   },
   "devDependencies": {
-    "@codemirror/autocomplete": "^6.2.0",
-    "@codemirror/language": "^6.3.0",
-    "@codemirror/lint": "^6.0.0",
-    "@codemirror/state": "^6.1.1",
-    "@codemirror/view": "^6.4.0",
-    "@lezer/common": "^1.0.1",
-    "@lezer/lr": "^1.2.3",
-    "@lezer/highlight": "^1.1.2",
-    "@types/lru-cache": "^5.1.1",
+    "@codemirror/autocomplete": "^6.17.0",
+    "@codemirror/language": "^6.10.2",
+    "@codemirror/lint": "^6.8.1",
+    "@codemirror/state": "^6.3.3",
+    "@codemirror/view": "^6.29.1",
+    "@lezer/common": "^1.2.1",
+    "@lezer/highlight": "^1.2.0",
+    "@lezer/lr": "^1.4.2",
     "isomorphic-fetch": "^3.0.0",
-    "nock": "^13.2.9"
+    "nock": "^13.5.4"
   },
   "peerDependencies": {
-    "@codemirror/autocomplete": "^6.2.0",
+    "@codemirror/autocomplete": "^6.4.0",
     "@codemirror/language": "^6.3.0",
     "@codemirror/lint": "^6.0.0",
     "@codemirror/state": "^6.1.1",

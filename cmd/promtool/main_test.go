@@ -14,6 +14,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -21,7 +23,9 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -53,17 +57,17 @@ func TestQueryRange(t *testing.T) {
 	defer s.Close()
 
 	urlObject, err := url.Parse(s.URL)
-	require.Equal(t, nil, err)
+	require.NoError(t, err)
 
 	p := &promqlPrinter{}
-	exitCode := QueryRange(urlObject, map[string]string{}, "up", "0", "300", 0, p)
+	exitCode := QueryRange(urlObject, http.DefaultTransport, map[string]string{}, "up", "0", "300", 0, p)
 	require.Equal(t, "/api/v1/query_range", getRequest().URL.Path)
 	form := getRequest().Form
 	require.Equal(t, "up", form.Get("query"))
 	require.Equal(t, "1", form.Get("step"))
 	require.Equal(t, 0, exitCode)
 
-	exitCode = QueryRange(urlObject, map[string]string{}, "up", "0", "300", 10*time.Millisecond, p)
+	exitCode = QueryRange(urlObject, http.DefaultTransport, map[string]string{}, "up", "0", "300", 10*time.Millisecond, p)
 	require.Equal(t, "/api/v1/query_range", getRequest().URL.Path)
 	form = getRequest().Form
 	require.Equal(t, "up", form.Get("query"))
@@ -76,10 +80,10 @@ func TestQueryInstant(t *testing.T) {
 	defer s.Close()
 
 	urlObject, err := url.Parse(s.URL)
-	require.Equal(t, nil, err)
+	require.NoError(t, err)
 
 	p := &promqlPrinter{}
-	exitCode := QueryInstant(urlObject, "up", "300", p)
+	exitCode := QueryInstant(urlObject, http.DefaultTransport, "up", "300", p)
 	require.Equal(t, "/api/v1/query", getRequest().URL.Path)
 	form := getRequest().Form
 	require.Equal(t, "up", form.Get("query"))
@@ -407,7 +411,7 @@ func TestExitCodes(t *testing.T) {
 	} {
 		t.Run(c.file, func(t *testing.T) {
 			for _, lintFatal := range []bool{true, false} {
-				t.Run(fmt.Sprintf("%t", lintFatal), func(t *testing.T) {
+				t.Run(strconv.FormatBool(lintFatal), func(t *testing.T) {
 					args := []string{"-test.main", "check", "config", "testdata/" + c.file}
 					if lintFatal {
 						args = append(args, "--lint-fatal")
@@ -432,4 +436,116 @@ func TestExitCodes(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDocumentation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.SkipNow()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, promtoolPath, "-test.main", "write-documentation")
+
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+
+	if err := cmd.Run(); err != nil {
+		var exitError *exec.ExitError
+		if errors.As(err, &exitError) && exitError.ExitCode() != 0 {
+			fmt.Println("Command failed with non-zero exit code")
+		}
+	}
+
+	generatedContent := strings.ReplaceAll(stdout.String(), filepath.Base(promtoolPath), strings.TrimSuffix(filepath.Base(promtoolPath), ".test"))
+
+	expectedContent, err := os.ReadFile(filepath.Join("..", "..", "docs", "command-line", "promtool.md"))
+	require.NoError(t, err)
+
+	require.Equal(t, string(expectedContent), generatedContent, "Generated content does not match documentation. Hint: run `make cli-documentation`.")
+}
+
+func TestCheckRules(t *testing.T) {
+	t.Run("rules-good", func(t *testing.T) {
+		data, err := os.ReadFile("./testdata/rules.yml")
+		require.NoError(t, err)
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		_, err = w.Write(data)
+		if err != nil {
+			t.Error(err)
+		}
+		w.Close()
+
+		// Restore stdin right after the test.
+		defer func(v *os.File) { os.Stdin = v }(os.Stdin)
+		os.Stdin = r
+
+		exitCode := CheckRules(newLintConfig(lintOptionDuplicateRules, false))
+		require.Equal(t, successExitCode, exitCode, "")
+	})
+
+	t.Run("rules-bad", func(t *testing.T) {
+		data, err := os.ReadFile("./testdata/rules-bad.yml")
+		require.NoError(t, err)
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		_, err = w.Write(data)
+		if err != nil {
+			t.Error(err)
+		}
+		w.Close()
+
+		// Restore stdin right after the test.
+		defer func(v *os.File) { os.Stdin = v }(os.Stdin)
+		os.Stdin = r
+
+		exitCode := CheckRules(newLintConfig(lintOptionDuplicateRules, false))
+		require.Equal(t, failureExitCode, exitCode, "")
+	})
+
+	t.Run("rules-lint-fatal", func(t *testing.T) {
+		data, err := os.ReadFile("./testdata/prometheus-rules.lint.yml")
+		require.NoError(t, err)
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		_, err = w.Write(data)
+		if err != nil {
+			t.Error(err)
+		}
+		w.Close()
+
+		// Restore stdin right after the test.
+		defer func(v *os.File) { os.Stdin = v }(os.Stdin)
+		os.Stdin = r
+
+		exitCode := CheckRules(newLintConfig(lintOptionDuplicateRules, true))
+		require.Equal(t, lintErrExitCode, exitCode, "")
+	})
+}
+
+func TestCheckRulesWithRuleFiles(t *testing.T) {
+	t.Run("rules-good", func(t *testing.T) {
+		exitCode := CheckRules(newLintConfig(lintOptionDuplicateRules, false), "./testdata/rules.yml")
+		require.Equal(t, successExitCode, exitCode, "")
+	})
+
+	t.Run("rules-bad", func(t *testing.T) {
+		exitCode := CheckRules(newLintConfig(lintOptionDuplicateRules, false), "./testdata/rules-bad.yml")
+		require.Equal(t, failureExitCode, exitCode, "")
+	})
+
+	t.Run("rules-lint-fatal", func(t *testing.T) {
+		exitCode := CheckRules(newLintConfig(lintOptionDuplicateRules, true), "./testdata/prometheus-rules.lint.yml")
+		require.Equal(t, lintErrExitCode, exitCode, "")
+	})
 }

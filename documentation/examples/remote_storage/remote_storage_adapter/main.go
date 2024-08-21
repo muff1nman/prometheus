@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alecthomas/kingpin/v2"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/gogo/protobuf/proto"
@@ -35,7 +36,6 @@ import (
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/common/promlog"
 	"github.com/prometheus/common/promlog/flag"
-	"gopkg.in/alecthomas/kingpin.v2"
 
 	"github.com/prometheus/prometheus/documentation/examples/remote_storage/remote_storage_adapter/graphite"
 	"github.com/prometheus/prometheus/documentation/examples/remote_storage/remote_storage_adapter/influxdb"
@@ -83,9 +83,12 @@ var (
 	)
 	sentBatchDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:    "sent_batch_duration_seconds",
-			Help:    "Duration of sample batch send calls to the remote storage.",
-			Buckets: prometheus.DefBuckets,
+			Name:                            "sent_batch_duration_seconds",
+			Help:                            "Duration of sample batch send calls to the remote storage.",
+			Buckets:                         prometheus.DefBuckets,
+			NativeHistogramBucketFactor:     1.1,
+			NativeHistogramMaxBucketNumber:  100,
+			NativeHistogramMinResetDuration: 1 * time.Hour,
 		},
 		[]string{"remote"},
 	)
