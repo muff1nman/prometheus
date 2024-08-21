@@ -35,6 +35,7 @@ import (
 
 	"github.com/alecthomas/jsonschema"
 	"github.com/alecthomas/kingpin/v2"
+	"github.com/alecthomas/units"
 	"github.com/go-kit/log"
 	"github.com/google/pprof/profile"
 	"github.com/prometheus/client_golang/api"
@@ -1061,8 +1062,9 @@ func schemaOverride(t reflect.Type) *jsonschema.Type {
 	regexpType := reflect.TypeOf((*relabel.Regexp)(nil)).Elem()
 	yamlNodeType := reflect.TypeOf((*yaml.Node)(nil)).Elem()
 	labelList := reflect.TypeOf((*labels.Labels)(nil)).Elem()
+	base2BytesType := reflect.TypeOf((*units.Base2Bytes)(nil)).Elem()
 
-	if t == durationType || t == regexpType || t == yamlNodeType {
+	if t == durationType || t == regexpType || t == yamlNodeType || t == base2BytesType {
 		return &jsonschema.Type{
 			Type: "string",
 		}
