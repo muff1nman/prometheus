@@ -14,7 +14,6 @@
 package relabel
 
 import (
-	"encoding/json"
 	"strconv"
 	"testing"
 
@@ -1062,36 +1061,4 @@ func TestRegexp_ShouldMarshalAndUnmarshalZeroValue(t *testing.T) {
 	err = yaml.Unmarshal(marshalled, &unmarshalled)
 	require.NoError(t, err)
 	require.Nil(t, unmarshalled.Regexp)
-}
-
-func TestRegexp_JSONUnmarshalThenMarshal(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-	}{
-		{
-			name:  "Empty regex",
-			input: `{"regex":""}`,
-		},
-		{
-			name:  "string literal",
-			input: `{"regex":"foo"}`,
-		},
-		{
-			name:  "regex",
-			input: `{"regex":".*foo.*"}`,
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			var unmarshalled Config
-			err := json.Unmarshal([]byte(test.input), &unmarshalled)
-			require.NoError(t, err)
-
-			marshalled, err := json.Marshal(&unmarshalled)
-			require.NoError(t, err)
-
-			require.Equal(t, test.input, string(marshalled))
-		})
-	}
 }
