@@ -280,3 +280,8 @@ func RegisterSDMetrics(registerer prometheus.Registerer, rmm RefreshMetricsManag
 	}
 	return metrics, nil
 }
+
+// ConfigsAsFields returns the dynamically generated golang StructFields for the Config type
+func ConfigsAsFields() []reflect.StructField {
+	return configFields
+}
