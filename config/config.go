@@ -750,9 +750,9 @@ type ScrapeConfig struct {
 	// Indicator whether the scraped metrics should remain unmodified.
 	HonorLabels bool `yaml:"honor_labels,omitempty"`
 	// Indicator whether the scraped timestamps should be respected.
-	HonorTimestamps bool `yaml:"honor_timestamps"`
+	HonorTimestamps bool `yaml:"honor_timestamps,omitempty"`
 	// Indicator whether to track the staleness of the scraped timestamps.
-	TrackTimestampsStaleness bool `yaml:"track_timestamps_staleness"`
+	TrackTimestampsStaleness bool `yaml:"track_timestamps_staleness,omitempty"`
 	// A set of query parameters with which the target is scraped.
 	Params url.Values `yaml:"params,omitempty"`
 	// How frequently to scrape the targets of this scrape config.
@@ -782,7 +782,7 @@ type ScrapeConfig struct {
 	// The URL scheme with which to fetch metrics from targets.
 	Scheme string `yaml:"scheme,omitempty"`
 	// Indicator whether to request compressed response from the target.
-	EnableCompression bool `yaml:"enable_compression"`
+	EnableCompression bool `yaml:"enable_compression,omitempty"`
 	// An uncompressed response body larger than this many bytes will cause the
 	// scrape to fail. 0 means no limit.
 	BodySizeLimit units.Base2Bytes `yaml:"body_size_limit,omitempty"`
@@ -1108,7 +1108,7 @@ type TSDBConfig struct {
 	// OutOfOrderTimeWindowFlag holds the parsed duration from the config file.
 	// During unmarshall, this is converted into milliseconds and stored in OutOfOrderTimeWindow.
 	// This should not be used directly and must be converted into OutOfOrderTimeWindow.
-	OutOfOrderTimeWindowFlag model.Duration `yaml:"out_of_order_time_window,omitempty"`
+	OutOfOrderTimeWindowFlag model.Duration `yaml:"out_of_order_time_window,omitempty" jsonschema:"-"`
 
 	// StaleSeriesCompactionThreshold is a number between 0.0-1.0 indicating the % of stale series in
 	// the in-memory Head block. If the % of stale series crosses this threshold, stale series compaction is run immediately.
@@ -1313,7 +1313,7 @@ type AlertmanagerConfig struct {
 	Timeout model.Duration `yaml:"timeout,omitempty"`
 
 	// The api version of Alertmanager.
-	APIVersion AlertmanagerAPIVersion `yaml:"api_version"`
+	APIVersion AlertmanagerAPIVersion `yaml:"api_version,omitempty"`
 
 	// List of Alertmanager relabel configurations.
 	RelabelConfigs []*relabel.Config `yaml:"relabel_configs,omitempty"`

@@ -290,3 +290,8 @@ func RegisteredConfigNames() []string {
 	sort.Strings(names)
 	return names
 }
+
+// ConfigsAsFields returns the dynamically generated golang StructFields for the Config type
+func ConfigsAsFields() []reflect.StructField {
+	return configFields
+}

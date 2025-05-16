@@ -24,14 +24,18 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
 
+	"github.com/alecthomas/jsonschema"
 	"github.com/alecthomas/kingpin/v2"
+	"github.com/alecthomas/units"
 	"github.com/google/pprof/profile"
 	"github.com/prometheus/client_golang/api"
 	"github.com/prometheus/client_golang/prometheus"
@@ -44,6 +48,7 @@ import (
 	"github.com/prometheus/common/version"
 	"github.com/prometheus/exporter-toolkit/web"
 	"go.yaml.in/yaml/v2"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
 	"github.com/prometheus/prometheus/config"
 	"github.com/prometheus/prometheus/discovery"
@@ -51,6 +56,7 @@ import (
 	"github.com/prometheus/prometheus/discovery/kubernetes"
 	"github.com/prometheus/prometheus/discovery/targetgroup"
 	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/model/relabel"
 	"github.com/prometheus/prometheus/model/rulefmt"
 	"github.com/prometheus/prometheus/notifier"
 	_ "github.com/prometheus/prometheus/plugins" // Register plugins.
@@ -194,6 +200,10 @@ func main() {
 	querySeriesMatch := querySeriesCmd.Flag("match", "Series selector. Can be specified multiple times.").Required().Strings()
 	querySeriesBegin := querySeriesCmd.Flag("start", "Start time (RFC3339 or Unix timestamp).").String()
 	querySeriesEnd := querySeriesCmd.Flag("end", "End time (RFC3339 or Unix timestamp).").String()
+
+	schemasCmd := app.Command("schemas", "Output schemas for types.")
+	schemasConfigCmd := schemasCmd.Command("config", "Output schema for config type.")
+	schemasRulesCmd := schemasCmd.Command("rules", "Output schema for rules type.")
 
 	debugCmd := app.Command("debug", "Fetch debug information.")
 	debugPprofCmd := debugCmd.Command("pprof", "Fetch profiling debug information.")
@@ -456,6 +466,12 @@ func main() {
 
 	case importRulesCmd.FullCommand():
 		os.Exit(checkErr(importRules(serverURL, httpRoundTripper, *importRulesStart, *importRulesEnd, *importRulesOutputDir, *importRulesEvalInterval, *maxBlockDuration, model.UTF8Validation, *importRulesFiles...)))
+
+	case schemasConfigCmd.FullCommand():
+		os.Exit(OutputSchema(reflect.TypeOf(&config.Config{})))
+
+	case schemasRulesCmd.FullCommand():
+		os.Exit(OutputSchema(reflect.TypeOf((*rulefmt.RuleGroups)(nil))))
 
 	case queryAnalyzeCmd.FullCommand():
 		os.Exit(checkErr(queryAnalyzeCfg.run(serverURL, httpRoundTripper)))
@@ -1145,6 +1161,134 @@ func checkMetricsExtended(r io.Reader) ([]metricStat, int, error) {
 	})
 
 	return stats, total, nil
+}
+
+func handleMapString(t reflect.Type) *jsonschema.Type {
+	switch t.Elem().Kind() {
+	case reflect.Slice:
+		return &jsonschema.Type{
+			AdditionalProperties: []byte(`{ "type": "array", "items": { "type": "string" }}`),
+			Type:                 "object",
+		}
+	case reflect.String:
+		return &jsonschema.Type{
+			Type:                 "object",
+			AdditionalProperties: []byte(`{"type": "string"}`),
+		}
+	}
+	return nil
+}
+
+func schemaOverride(t reflect.Type) *jsonschema.Type {
+	durationType := reflect.TypeOf((*model.Duration)(nil)).Elem()
+	regexpType := reflect.TypeOf((*relabel.Regexp)(nil)).Elem()
+	labelList := reflect.TypeOf((*labels.Labels)(nil)).Elem()
+	base2BytesType := reflect.TypeOf((*units.Base2Bytes)(nil)).Elem()
+	urlType := reflect.TypeOf((*promconfig.URL)(nil)).Elem()
+
+	if t == durationType || t == regexpType || t == base2BytesType || t == urlType {
+		return &jsonschema.Type{
+			Type: "string",
+		}
+	}
+
+	// model/labels.Labels has special unmarshalling behavior that unmarshals a map of name:value pairs into a list of model/labels.Label structs
+	if t == labelList {
+		return &jsonschema.Type{
+			Type:                 "object",
+			AdditionalProperties: []byte(`{"type": "string"}`),
+		}
+	}
+
+	// Special handling of map[string]<something> types and slices of those types so that they are evaluated correctly by json2jsii
+	// Specifically, we do this for Labels and Annotations in rule defs,
+	// as well as some other places where map[string][]string isn't handled correctly
+	if t.Kind() == reflect.Map && t.Key().Kind() == reflect.String {
+		return handleMapString(t)
+	} else if t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Map && t.Elem().Key().Kind() == reflect.String {
+		mapType := handleMapString(t.Elem())
+		return &jsonschema.Type{
+			Type:  "array",
+			Items: mapType,
+		}
+	}
+
+	return nil
+}
+
+func schemaTypeName(t reflect.Type) string {
+	mainConfigType := reflect.TypeOf((*config.Config)(nil)).Elem()
+	if t == mainConfigType {
+		return "PrometheusConfig"
+	}
+	switch t.Name() {
+	case "SDConfig", "Config":
+		return strings.Title(path.Base(t.PkgPath())) + t.Name()
+	}
+	return ""
+}
+
+func schemaAddFields(t reflect.Type) []reflect.StructField {
+	scrapeConfig := reflect.TypeOf((*config.ScrapeConfig)(nil)).Elem()
+	alertConfig := reflect.TypeOf((*config.AlertmanagerConfig)(nil)).Elem()
+	group := reflect.TypeOf((*targetgroup.Group)(nil)).Elem()
+	if t == scrapeConfig || t == alertConfig {
+		return discovery.ConfigsAsFields()
+	}
+
+	// There is special marshalling behavior in the discovery/targetgroup package that
+	// converts a list of addresses from the inputted string into LabelName:LabelValue pairs using a hard coded LabelName
+	if t == group {
+		return []reflect.StructField{
+			{
+				Name: "targets",
+				Type: reflect.TypeOf((*[]string)(nil)).Elem(),
+			},
+		}
+	}
+	return nil
+}
+
+func removeRequiredFields(schema *apiextensionsv1.JSONSchemaProps) {
+	fieldsToDelete := make([]int, 0)
+	for i, val := range schema.Required {
+		// These fields are optional, and have defaults set,
+		// but are not tagged with omitempty by upstream to ensure their false values are unmarshalled clearly
+		if val == "follow_redirects" || val == "enable_http2" {
+			fieldsToDelete = append(fieldsToDelete, i)
+		}
+	}
+
+	// Ensure we iterate through the array backwards to prevent changing the index numbers
+	sort.Ints(fieldsToDelete)
+	for i := len(fieldsToDelete) - 1; i >= 0; i-- {
+		indexToDelete := fieldsToDelete[i]
+		schema.Required = append(schema.Required[:indexToDelete], schema.Required[indexToDelete+1:]...)
+	}
+}
+
+// OutputSchema renders a json schema for the given Type.
+func OutputSchema(t reflect.Type) int {
+	r := &jsonschema.Reflector{
+		TypeNamer:           schemaTypeName,
+		YAMLEmbeddedStructs: true,
+		TypeMapper:          schemaOverride,
+		AdditionalFields:    schemaAddFields,
+	}
+	schema := r.ReflectFromType(t)
+	schemaBytes, err := json.Marshal(schema)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		return 1
+	}
+
+	parsedSchema, err := ParseSchemaFromBytes(schemaBytes, removeRequiredFields)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err.Error())
+		return 1
+	}
+	fmt.Println(string(parsedSchema))
+	return 0
 }
 
 type endpointsGroup struct {
