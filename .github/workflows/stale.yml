@@ -1,8 +1,6 @@
 name: Stale Check
 on:
   workflow_dispatch: {}
-  schedule:
-    - cron: '16 22 * * *'
 permissions:
   issues: write
   pull-requests: write

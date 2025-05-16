@@ -1,11 +1,7 @@
 ---
 name: Sync repo files
-on:
-  schedule:
-    - cron: '44 17 * * *'
-permissions:
-  contents: read
-
+on:  # yamllint disable-line rule:truthy
+  workflow_dispatch:
 jobs:
   repo_sync:
     runs-on: ubuntu-latest
