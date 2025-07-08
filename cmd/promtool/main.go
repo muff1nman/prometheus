@@ -1140,8 +1140,9 @@ func schemaOverride(t reflect.Type) *jsonschema.Type {
 	yamlNodeType := reflect.TypeOf((*yaml.Node)(nil)).Elem()
 	labelList := reflect.TypeOf((*labels.Labels)(nil)).Elem()
 	base2BytesType := reflect.TypeOf((*units.Base2Bytes)(nil)).Elem()
+	urlType := reflect.TypeOf((*promconfig.URL)(nil)).Elem()
 
-	if t == durationType || t == regexpType || t == yamlNodeType || t == base2BytesType {
+	if t == durationType || t == regexpType || t == yamlNodeType || t == base2BytesType || t == urlType {
 		return &jsonschema.Type{
 			Type: "string",
 		}
